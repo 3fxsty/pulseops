@@ -339,3 +339,332 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 - **Secret scanning:** push protection is to be enabled on GitHub. It is unavailable for free on private repositories, so it is tracked as pending.
 
 **Rationale.** Cheap measures now, which avoid expensive incidents once there are real data and users. The full set of permanent rules lives in `CLAUDE.md` under "Security".
+
+---
+
+## ADR-017 — API routes and versioning: `/api/v1/monitors`
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Options.**
+1. **Versioned prefix** `/api/v1/...`.
+2. **Unversioned** `/monitors`.
+
+**Decision.** Versioned prefix:
+
+| Method | Path | Response |
+|---|---|---|
+| POST | `/api/v1/monitors` | 201 + `Location` |
+| GET | `/api/v1/monitors` | 200, paginated |
+| GET | `/api/v1/monitors/{id}` | 200 / 404 |
+| PATCH | `/api/v1/monitors/{id}` | 200 / 404 |
+| DELETE | `/api/v1/monitors/{id}` | 204 / 404 (checks removed by cascade) |
+
+`/health` stays outside the prefix and unauthenticated.
+
+**Rationale.** Breaking changes (e.g. users in Phase 10) can ship as `/api/v2` without breaking v1 clients.
+
+**Weak point.** Longer URLs, and maintaining two versions in parallel would cost real work.
+
+**Reversibility.** Hard: routes are the public contract.
+
+---
+
+## ADR-018 — Editing: PATCH only
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Options.**
+1. **PATCH only.**
+2. **PUT + PATCH.**
+3. **Dedicated `/pause` and `/resume` endpoints.**
+
+**Decision.** PATCH only.
+- Only the fields sent are applied (`exclude_unset`).
+- `null` for a required field (`name`, `url`, `interval_seconds`, `is_active`) is a 422.
+- Pausing is `PATCH {"is_active": false}`.
+- If `url` is present, it goes through exactly the same checks as on creation: normalization, SSRF and duplicates. If it is absent, no URL check or DNS lookup happens, so pausing works even when the site's DNS is down.
+
+**Rationale.** Partial edits cover every MVP use case. PUT would duplicate code, and dedicated endpoints would duplicate what PATCH already does.
+
+**Weak point.** Clients cannot replace a whole resource atomically. Nobody needs that today.
+
+**Reversibility.** Easy to add PUT later. Removing PATCH would be hard.
+
+---
+
+## ADR-019 — Public identifier named `id`
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Options.**
+1. **Expose `public_id` as `id`.**
+2. **Expose it as `public_id`.**
+
+**Decision.** The API field `id` carries `monitors.public_id` (UUID v7). The internal integer id never leaves the API. In the code, `public_id` and `id` are always named explicitly so they cannot be confused.
+
+**Rationale.** Clients do not need to know an internal key exists, and the contract stays clean.
+
+**Weak point.** `id` means different things in the API and in the database. Explicit naming in the code mitigates it.
+
+**Reversibility.** Hard: it is part of the response contract.
+
+---
+
+## ADR-020 — Errors: RFC 9457 Problem Details + `code`
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Options.**
+1. **RFC 9457** Problem Details.
+2. **FastAPI's default** `{"detail": ...}`.
+3. **A custom envelope.**
+
+**Decision.** `application/problem+json` with `type`, `title`, `status`, `detail` and an extension member `code`: a stable snake_case identifier that programs can match without parsing text.
+- `type` is a relative reference under our own namespace (`/problems/<slug>`), never a domain we do not own.
+- **422:** an own handler converts FastAPI/Pydantic errors into an `errors` list with only `loc`, `msg` and `type`. **Never `input`**: echoing input could leak, e.g., a password embedded in a URL.
+- **500:** always generic (`internal_error`), with no traces, SQL, table or constraint names. Details go to the logs only.
+- **Status mapping:**
+
+| Status | `code` | When |
+|---|---|---|
+| 401 | `unauthorized` | Missing or wrong API key |
+| 404 | `monitor_not_found` | |
+| 409 | `monitor_url_conflict` | Detected by catching the `uq_monitors_url` violation by name, not with a racy SELECT first |
+| 422 | `validation_error`, `url_target_not_allowed`, `url_credentials_not_allowed` | |
+| 500 | `internal_error` | Any other integrity error, or anything unexpected |
+
+- Implemented with our own exception handlers, without dependencies.
+- "Must never happen" tests (exact response fields, no leaked internals, no echoed secrets, generic 500, 401 without key, key absent from logs) are part of this decision.
+
+**Rationale.** A standard format that any client understands, plus a machine-readable `code`. Errors become an attack surface if they leak internals.
+
+**Weak point.** A relative `type` resolves against our own host, where nothing is served. It works as an identifier, not as documentation.
+
+**Reversibility.** Hard: clients code against the error format.
+
+---
+
+## ADR-021 — Monitor list pagination: limit/offset
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Options.**
+1. **limit/offset.**
+2. **Cursor (keyset).**
+3. **No pagination.**
+
+**Decision.** `?limit=50&offset=0`: `limit` defaults to 50 (max 100), `offset` >= 0.
+- Optional `is_active` filter; no other filters or sort options.
+- Fixed, tie-free order by the internal `id`, ascending (creation order).
+- Response: `{items, total, limit, offset}`.
+
+**Rationale.** Simple and enough for tens or hundreds of monitors. A fixed order keeps the "closed list" security rule trivially true.
+
+**Weak point.** Offset pages can shift if rows are inserted while paging, and get slower on large offsets. The check history (Phase 5) will therefore use cursor pagination on `(monitor_id, scheduled_at)`.
+
+**Reversibility.** Medium: adding cursor parameters later is additive, but removing offset would break clients.
+
+---
+
+## ADR-022 — URL normalization
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Context.** Without normalization, `HTTPS://Example.com` and `https://example.com/` would be stored as different monitors.
+
+**Decision.** In this order:
+1. Strip surrounding whitespace.
+2. Validate with Pydantic `HttpUrl`, which:
+   - lowercases scheme and host;
+   - drops default ports;
+   - converts international domains to punycode;
+   - adds `/` for an empty path;
+   - accepts only `http` and `https`;
+   - canonicalizes odd IP notations (e.g. `http://2130706433/` becomes `127.0.0.1`).
+3. Drop the `#fragment`: browsers never send it to the server.
+4. Drop a trailing dot from the host (`example.com.` → `example.com`).
+5. Reject `user:password@` with 422 `url_credentials_not_allowed`: those credentials would be stored in plain text and shown by the API.
+6. Leave path and query untouched: they are case-sensitive and order may matter.
+7. Enforce <= 2048 characters **after** normalization (punycode can lengthen a URL).
+
+**Rejected.** Percent-encoding normalization (RFC 3986 §6.2.2), to be reevaluated if real duplicates appear.
+
+**Weak point.** Duplicates that differ only in percent-encoding or query order are not detected.
+
+**Reversibility.** Medium: stricter rules later may require a data migration to re-normalize stored URLs.
+
+---
+
+## ADR-023 — SSRF protection on create and edit
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Context.** PulseOps fetches URLs supplied by users. Without protection, it could be pointed at internal services (PostgreSQL, Valkey) or at cloud metadata endpoints (`169.254.169.254`).
+
+**Options.**
+1. **Literal IPs + DNS resolution at creation.**
+2. **Literal IPs and obvious names only**, without DNS.
+
+**Decision.** Option 1, in `pulseops/security/ssrf.py`, reused by the checker in Phase 3.
+- **Literal IP hosts** are checked directly. **Hostnames** are resolved asynchronously (`loop.getaddrinfo`) with a short timeout.
+- **If resolution fails or times out, the URL is accepted.** The check will record `dns_error`, and Phase 3 validates again on every check.
+- **If any resolved address is not allowed,** the request gets 422 `url_target_not_allowed` with a generic message that never reveals the IP or what a name resolves to, so the API cannot be used to map the internal network.
+- **Any port** is allowed (real APIs live on 8080, 8443…).
+- `ALLOW_PRIVATE_TARGETS=true` disables the block for self-hosted installs on private networks.
+
+**IP rule.**
+1. Unwrap IPv4 embedded in IPv6: IPv4-mapped (`::ffff:0:0/96`), 6to4 (`2002::/16`), Teredo (client address) and NAT64 well-known prefix `64:ff9b::/96` (last 32 bits). The embedded IPv4 must **also** be allowed.
+2. An address is allowed only if `is_global` is true, it is not multicast, it is not in `::/96` (deprecated IPv4-compatible), and it is not in `64:ff9b:1::/48`. The local-use NAT64 range is blocked whole, because the IPv4 position inside it is not reliable.
+
+**Verified gaps in Python 3.13** (covered by tests):
+- `224.0.0.1` and `ff02::1` (multicast), `64:ff9b::7f00:1` (NAT64 wrapping 127.0.0.1) and `::127.0.0.1` (IPv4-compatible) all report `is_global=True`.
+- 6to4 and Teredo already report `is_global=False` as whole ranges, so unwrapping them is defence in depth.
+
+**Rationale.**
+- **Validating NAT64 instead of blocking it** keeps PulseOps usable on an IPv6-only VPS with DNS64, where every IPv4-only site resolves into `64:ff9b::/96`.
+- **Accepting unresolvable names** avoids rejecting domains that do not exist yet. The authoritative check happens at fetch time.
+
+**Weak point.** A creation-time check is time-of-check/time-of-use: DNS can change afterwards (DNS rebinding). That is why Phase 3 re-validates on every check and every redirect. Also, `getaddrinfo` runs in a thread pool and a timeout does not free the thread; acceptable for the API, to be revisited for the checker in Phase 3.
+
+**Reversibility.** Easy: internal module behind one function.
+
+---
+
+## ADR-024 — API authentication: static API key in `ApiSettings`
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Context.** The MVP has no users, but an open API would let anyone create monitors.
+
+**Options.**
+1. **Static API key** in a header.
+2. **No authentication** until Phase 9/10.
+
+**Settings options.**
+1. **A separate `ApiSettings`.**
+2. **The shared `Settings`.**
+
+**Decision.**
+- **The key:** `X-API-Key` header, value from `API_KEY`. It is required, at least 32 characters (`openssl rand -base64 32`), validated at startup (no valid key, no API) and compared with `secrets.compare_digest` (constant time). It never appears in logs or errors.
+- **Where it lives:** a separate `ApiSettings` (with `DOCS_ENABLED`), so the worker never needs or sees the key.
+- **Scope:** `/health` stays open. Swagger exposes the key through its "Authorize" button. A missing or wrong key gets 401 `unauthorized`.
+
+**Rationale.** Cheap, and it closes the hole before deployment. A separate settings class keeps least privilege between API and worker.
+
+**Weak point.** A single shared secret with no rotation, per-client identity or brute-force throttling. Throttling will be done in the Phase 9 proxy, and the key is replaced by users in Phase 10.
+
+**Reversibility.** Easy: one dependency on the router.
+
+---
+
+## ADR-025 — Code layers: router → repository
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Options.**
+1. **Router → repository.**
+2. **Router with SQLAlchemy inline.**
+3. **Router → service → repository.**
+
+**Decision.** Option 1.
+- `api/monitors.py` only speaks HTTP: it validates, translates and responds, and never touches the database.
+- `repositories/monitors.py` owns all database access and knows nothing about HTTP.
+
+**Rationale.** Phase 10's owner filter will be added in exactly one place, as the Security rules require. A service layer is premature until real business logic appears (alerts, Phase 7).
+
+**Weak point.** Small orchestration logic (URL validation before saving) lives in the router for now.
+
+**Reversibility.** Easy: a service layer can be inserted later without changing the API.
+
+---
+
+## ADR-026 — Changing a monitor's URL is allowed
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Options.**
+1. **Allow URL changes via PATCH.**
+2. **Make `url` immutable**, so a new URL means a new monitor.
+
+**Decision.** Allowed, always with normalization, SSRF and duplicate checks. The existing check history is kept.
+
+**Rationale.** Fixing a typo or following a migration (e.g. `http` → `https`) should not lose history.
+
+**Weak point.** History before the change refers to the old URL, and the API does not record when the URL changed.
+
+**Reversibility.** Easy to forbid later. Allowing it again after forbidding it is also easy.
+
+---
+
+## ADR-027 — `DOCS_ENABLED` setting
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Decision.** Boolean in `ApiSettings`, default `true`. With `false`, `/docs`, `/redoc` and `/openapi.json` are disabled. The production value is decided in Phase 9.
+
+**Rationale.** The API map helps attackers, and FastAPI's Swagger page loads its assets from an external CDN.
+
+**Weak point.** Hiding docs is not a security control by itself.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-028 — No CORS
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Decision.** The CORS middleware is not added. If it is ever needed, it will allow specific origins only, never `*`.
+
+**Rationale.** There is no browser frontend on another origin. The safe default is that browsers block cross-site calls.
+
+**Weak point.** A future web UI on another domain will need explicit configuration.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-029 — API exposure and request size
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Decision.**
+- **Now:** Compose publishes the API on `127.0.0.1:8000` only, so it is reachable from this machine alone until Phase 9.
+- **Phase 9:** the reverse proxy limits request body size. FastAPI has no body limit, and Pydantic limits apply only after the body is already in memory.
+
+**Weak point.** Until Phase 9 there is no body size limit, which is acceptable while the API is local-only and behind an API key.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-030 — `ValidatedUrl`: only validated URLs reach the database
+
+- **Date:** 2026-10-27 (Phase 2)
+- **Status:** Accepted
+
+**Context.** URL validation (normalization + SSRF) runs outside Pydantic, because it needs its own error codes and an async DNS lookup. A future endpoint could forget to call it.
+
+**Decision.** The repository accepts only a `ValidatedUrl` for the `url` field.
+- `ValidatedUrl` is an immutable type in `pulseops.security`, created only by the validation function. Its constructor requires a module-private token and raises otherwise.
+- The repository also checks `isinstance` at runtime.
+
+**Rationale.** Saving an unvalidated URL becomes impossible by accident, even for endpoints added later.
+
+**Weak point.** Python has no truly private constructors: importing the private token would bypass the guard. It prevents mistakes, not deliberate misuse, and such a bypass stands out in code review.
+
+**Reversibility.** Easy.
