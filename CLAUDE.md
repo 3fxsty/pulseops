@@ -18,9 +18,21 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 4. Al terminar algo, resume en pocas líneas **qué hace cada pieza a nivel de arquitectura**, no de sintaxis.
 5. **Toda decisión aprobada se registra en `docs/decisions.md`**, en inglés (formato ADR: contexto, opciones, decisión, motivo).
 6. No avances a la siguiente fase hasta que la actual cumpla su criterio de "terminada" y Toni lo haya probado.
-7. Mantén este archivo al día: actualiza "Estado actual" al cerrar cada fase.
+7. **Este archivo es la fuente de verdad del proyecto y debe estar siempre al día.** Cada sesión nueva empieza leyéndolo, así que tiene que reflejar el estado real sin depender de conversaciones anteriores:
+   - **En cuanto se detecte un cambio, se actualiza aquí en ese momento**, no al final de la fase. Por ejemplo: una herramienta sustituida, una decisión nueva, una regla de negocio modificada, una tarea pendiente o algo que haya que hacer en una fase futura.
+   - Si un cambio afecta a varias secciones (stack, arquitectura, roadmap…), se corrigen todas.
+   - Lo que quede pendiente para más adelante se apunta en "Estado actual" o en la fase correspondiente del roadmap, para que se sepa que hay que hacerlo.
+   - Al cerrar cada fase se revisa "Estado actual" completo.
+8. **Al empezar cada fase nueva, entra en modo plan** antes de escribir código. En ese plan, explícale a Toni:
+   - qué tiene que investigar y por qué importa cada tema;
+   - qué decisiones tiene que dejar claras antes de construir, con las opciones que conviene comparar;
+   - qué se va a construir y cuál es el criterio de "terminada".
+9. **Evalúa cada opción por lo que aporta a PulseOps, no por su popularidad.** La popularidad solo sirve para desempatar. Si se descarta algo, explica por qué no compensa ahora y cuándo convendría reevaluarlo.
+10. **Evalúa la seguridad en cada decisión, también a futuro.** Una mala decisión hoy puede costar caro cuando ya haya datos y usuarios. Las reglas permanentes están en la sección "Seguridad".
+11. **Revisa a mano cada migración autogenerada antes de aplicarla** y avisa de cualquier posible pérdida de datos. Por ejemplo, Alembic interpreta un renombrado como borrar + crear.
 
 ### El ciclo de cada fase
+0. **Planificar** (modo plan): Claude explica qué hay que investigar y decidir en la fase.
 1. **Investigar**: qué necesitamos y qué opciones existen.
 2. **Decidir**: Toni elige; se apunta en `docs/decisions.md`.
 3. **Construir**: Claude programa en una rama de la fase (`phase-N-name`).
@@ -36,11 +48,13 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 | Lenguaje | Python 3.12+ | Todo el backend |
 | Proyecto y dependencias | uv | Dependencias, entornos virtuales y versión de Python |
 | API | FastAPI | Gestión de monitores y consulta de estado; Swagger automático |
-| Cliente HTTP | httpx2 (async) | Hace las comprobaciones y mide el tiempo de respuesta (sustituye a httpx, ver ADR-008) |
+| Cliente HTTP | httpx2 (async, ≥ 2.13.1) | Hace las comprobaciones y mide el tiempo de respuesta (sustituye a httpx, ver ADR-008) |
 | Cola de tareas | ArdiQ | Programa y ejecuta los checks en segundo plano (workers) |
 | Broker | Valkey | Memoria rápida donde ArdiQ guarda la cola (confirmado con `ardiq doctor`, ver ADR-007) |
-| Base de datos | PostgreSQL | Monitores, historial de checks, incidentes |
+| Base de datos | PostgreSQL 18 | Monitores, historial de checks, incidentes (18 es necesario para `uuidv7()`) |
 | ORM y migraciones | SQLAlchemy 2 (async) + Alembic | Acceso a la BD y cambios de esquema |
+| Driver de PostgreSQL | asyncpg | Conexión async con el protocolo binario de PostgreSQL (ADR-009) |
+| Configuración | pydantic-settings | Lee y valida las variables de entorno; secretos como `SecretStr` (ADR-013) |
 | Tests | pytest | Tests automáticos |
 | Lint y formato | Ruff | Revisión y formato de código |
 | CI/CD | GitHub Actions | Lint + tests en cada push |
@@ -60,6 +74,34 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 
 ### Valkey vs Redis
 ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que debería funcionar con ambos, pero no está probado oficialmente. **Plan:** en la Fase 0, levantar Valkey en Docker Compose y ejecutar `ardiq doctor`. Si pasa → Valkey. Si falla → Redis (cambio de una línea) y avisar al autor.
+
+---
+
+## Seguridad (reglas permanentes)
+
+- **SQL:** siempre con SQLAlchemy y parámetros. **Prohibido** concatenar texto o usar f-strings para construir SQL. Los campos de ordenación y filtro que lleguen del usuario se eligen de una lista cerrada.
+- **Ruff** con las reglas "S" (flake8-bandit) activas.
+- **Mínimo privilegio en la BD** (ADR-014). Hay tres roles:
+  - `postgres`: superusuario, solo para administrar; la app nunca lo usa.
+  - `pulseops_owner`: dueño del esquema, no es superusuario; solo lo usan las migraciones.
+  - `pulseops_app`: lo usan la API y el worker; solo trabaja con filas (SELECT, INSERT, UPDATE, DELETE).
+- **Valkey** con contraseña. Los puertos de PostgreSQL y Valkey no se publican fuera de Docker; si hace falta en local, solo en `127.0.0.1`.
+- **ArdiQ siempre con msgpack (su codec por defecto), nunca con pickle**, por el riesgo de ejecución de código en el worker.
+- **Secretos:**
+  - Solo en `.env`, que nunca se sube; `.env.example` lleva valores falsos.
+  - `SecretStr` en `Settings`.
+  - Docker Compose exige los secretos (`${VAR:?}`) en lugar de usar valores por defecto débiles.
+  - Escaneo de secretos con push protection en GitHub (ver "Estado actual").
+- **Dependencias** fijadas con `uv.lock`, con Dependabot activo.
+- **Docker:** imágenes ligeras y sin ejecutar como root.
+- **SSRF** (PulseOps visita URLs que da el usuario):
+  - Solo `http` y `https`.
+  - IPs privadas, loopback, link-local y reservadas bloqueadas por defecto; `ALLOW_PRIVATE_TARGETS=true` las permite en instalaciones dentro de una red propia.
+  - Validar en **cada check**, no solo al crear el monitor (por el DNS rebinding), y en **cada redirección** (máximo 5).
+  - Verificación SSL siempre activa.
+- **Futuro:**
+  - Fase 8: escapar siempre la salida HTML (XSS).
+  - Fase 10: filtrar por dueño en una única capa de acceso a datos y limitar el número de monitores por usuario.
 
 ---
 
@@ -103,21 +145,40 @@ Proyecto creado con `uv init` y dependencias base instaladas (FastAPI, uvicorn, 
 
 **Fase 1 — Modelo de datos**
 Tablas de monitores y comprobaciones con SQLAlchemy; primera migración con Alembic.
-- A decidir: campos de un monitor y qué se guarda de cada check.
-- Terminada cuando: las tablas se crean con una migración.
+- Decidido (ADR-009 a ADR-016):
+  - asyncpg.
+  - `monitors`: `id` entero interno + `public_id` UUID v7.
+  - `checks`: PK compuesta `(monitor_id, scheduled_at)` y `error_kind` con valores cerrados.
+  - CHECK en la BD como defensa en profundidad y cascada `ON DELETE` hecha por PostgreSQL.
+  - BRIN en `scheduled_at`.
+  - pydantic-settings, servicio `migrate` con 3 roles y tests sobre una BD separada (`pulseops_test`).
+- Terminada cuando:
+  - `docker compose down -v && docker compose up --build` migra solo y la API queda healthy;
+  - downgrade y upgrade funcionan, y `alembic check` está limpio;
+  - Ruff (con S) y pytest en verde, incluidos los tests de permisos;
+  - Toni lo prueba.
 
 **Fase 2 — API de monitores**
 CRUD con FastAPI, validaciones (URL válida, intervalo ≥ 30 s), Swagger.
+- Ya decidido:
+  - normalización de la URL (esquema y dominio en minúsculas, etc.) y validación SSRF al crear o editar un monitor;
+  - la API expone **solo `public_id`**, nunca el `id` interno.
 - A decidir: rutas de la API y formato de errores.
 - Terminada cuando: Toni gestiona monitores desde Swagger.
 
 **Fase 3 — El comprobador**
 Función que visita una URL con httpx2 y devuelve estado, código HTTP y latencia según el criterio de caída.
+- Ya decidido:
+  - validación SSRF en cada check y en cada redirección (máximo 5);
+  - GET sin descargar el cuerpo de la respuesta;
+  - verificación SSL siempre activa;
+  - el motivo del fallo usa los `error_kind` de la BD (timeout, dns_error, connection_error, ssl_error, http_error, blocked_target).
 - A decidir: seguir redirecciones o no, User-Agent, detalles de timeouts.
 - Terminada cuando: tests cubren web OK, web con error y web lenta.
 
 **Fase 4 — Checks automáticos (ArdiQ)**
 Lanzar los checks según el intervalo de cada monitor y guardar resultados.
+- Ya decidido: los checks se insertan con `ON CONFLICT DO NOTHING` sobre la PK `(monitor_id, scheduled_at)`, que los hace idempotentes frente a las reejecuciones de ArdiQ. `scheduled_at` es la hora en que tocaba el check, no la real.
 - A decidir (**decisión clave del MVP, investigar a fondo**): un cron global que cada pocos segundos mira qué monitores tocan vs. una tarea programada por monitor.
 - Terminada cuando: al añadir una web aparecen comprobaciones solas.
 
@@ -127,7 +188,7 @@ Endpoints de estado actual, uptime y latencia media; limpieza automática de dat
 - Terminada cuando: se puede consultar cómo ha ido una web en la última semana.
 
 **Fase 6 — CI y presentación**
-GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios), README con diagrama, instrucciones y capturas.
+GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic check`), README con diagrama, instrucciones y capturas.
 - Terminada cuando: check verde en GitHub y release **v0.1.0**. → **MVP completo.**
 
 ### Post-MVP
@@ -152,8 +213,18 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios), README con
 
 ## Estado actual
 
-- **Fase actual:** Fase 0 — Cimientos (terminada, pendiente de fusionar el PR) → siguiente: Fase 1 — Modelo de datos.
-- **Hecho en Fase 0:** proyecto uv con Python 3.13 y estructura `src/pulseops/`; app FastAPI con `/health` y Swagger; módulo `pulseops/queue/` con ArdiQ aislado; Dockerfile + Docker Compose (API, PostgreSQL 18, Valkey 9) con healthchecks; `ardiq doctor` OK contra Valkey; cambio de httpx a httpx2; ADR-001 a ADR-008 en `docs/decisions.md`.
+- **Fase actual:** Fase 1 — Modelo de datos, **en curso** en la rama `phase-1-data-model`. Las decisiones están tomadas (ADR-009 a ADR-016); falta construir.
+- **Hecho en Fase 0:**
+  - proyecto uv con Python 3.13 y estructura `src/pulseops/`;
+  - app FastAPI con `/health` y Swagger;
+  - módulo `pulseops/queue/` con ArdiQ aislado;
+  - Dockerfile + Docker Compose (API, PostgreSQL 18, Valkey 9) con healthchecks;
+  - `ardiq doctor` OK contra Valkey;
+  - cambio de httpx a httpx2;
+  - ADR-001 a ADR-008.
 - **Pendiente de decidir:** interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
-- **Notas para más adelante:** en el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
-- **Siguiente paso:** fusionar el PR de la Fase 0 y empezar la Fase 1 investigando los campos de un monitor y qué se guarda de cada check.
+- **Pendiente de hacer (Toni):** activar el escaneo de secretos con push protection en GitHub. El repo es privado y ahí GitHub no lo ofrece gratis (requiere Secret Protection, de pago): revisar los ajustes del repo o activarlo cuando el repo pase a público.
+- **Notas para más adelante:**
+  - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
+  - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
+- **Siguiente paso:** construir la Fase 1 según el plan aprobado. Antes de aplicar la migración, revisarla a mano y enseñarle a Toni un resumen.
