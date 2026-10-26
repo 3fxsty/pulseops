@@ -1,0 +1,36 @@
+[project]
+name = "pulseops"
+version = "0.1.0"
+description = "Uptime monitoring for websites and APIs"
+readme = "README.md"
+authors = [
+    { name = "17fastyyy", email = "3fxsty@proton.me" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.20.1",
+    "ardiq>=1.2.0",
+    "fastapi>=0.162.0",
+    "httpx2>=2.16.0",
+    "sqlalchemy>=2.1.6",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.17.2",
+]
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

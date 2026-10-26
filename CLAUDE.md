@@ -36,9 +36,9 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 | Lenguaje | Python 3.12+ | Todo el backend |
 | Proyecto y dependencias | uv | Dependencias, entornos virtuales y versión de Python |
 | API | FastAPI | Gestión de monitores y consulta de estado; Swagger automático |
-| Cliente HTTP | httpx (async) | Hace las comprobaciones y mide el tiempo de respuesta |
+| Cliente HTTP | httpx2 (async) | Hace las comprobaciones y mide el tiempo de respuesta (sustituye a httpx, ver ADR-008) |
 | Cola de tareas | ArdiQ | Programa y ejecuta los checks en segundo plano (workers) |
-| Broker | Valkey (o Redis) | Memoria rápida donde ArdiQ guarda la cola — **pendiente de confirmar** |
+| Broker | Valkey | Memoria rápida donde ArdiQ guarda la cola (confirmado con `ardiq doctor`, ver ADR-007) |
 | Base de datos | PostgreSQL | Monitores, historial de checks, incidentes |
 | ORM y migraciones | SQLAlchemy 2 (async) + Alembic | Acceso a la BD y cambios de esquema |
 | Tests | pytest | Tests automáticos |
@@ -67,7 +67,7 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
 
 1. El usuario usa la **API (FastAPI)** para añadir monitores → se guardan en **PostgreSQL**.
 2. Un **cron de ArdiQ** decide qué monitores tocan y deja encargos en **Valkey**.
-3. El **worker de ArdiQ** coge cada encargo, comprueba la web con **httpx** y guarda el resultado en **PostgreSQL**.
+3. El **worker de ArdiQ** coge cada encargo, comprueba la web con **httpx2** y guarda el resultado en **PostgreSQL**.
 4. La API calcula estado, uptime y tiempos a partir del historial.
 5. (Post-MVP) Si hay caída → alerta por **Telegram**; métricas en **Grafana**; todo detrás de **Nginx/Caddy** en un VPS.
 
@@ -112,7 +112,7 @@ CRUD con FastAPI, validaciones (URL válida, intervalo ≥ 30 s), Swagger.
 - Terminada cuando: Toni gestiona monitores desde Swagger.
 
 **Fase 3 — El comprobador**
-Función que visita una URL con httpx y devuelve estado, código HTTP y latencia según el criterio de caída.
+Función que visita una URL con httpx2 y devuelve estado, código HTTP y latencia según el criterio de caída.
 - A decidir: seguir redirecciones o no, User-Agent, detalles de timeouts.
 - Terminada cuando: tests cubren web OK, web con error y web lenta.
 
@@ -152,7 +152,8 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios), README con
 
 ## Estado actual
 
-- **Fase actual:** Fase 0 — Cimientos (no empezada).
-- **Hecho:** investigación del stack y definición del MVP (todo lo de este archivo).
-- **Pendiente de decidir:** Valkey o Redis (Fase 0), interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
-- **Siguiente paso:** crear el repo `pulseops` en GitHub y empezar la Fase 0.
+- **Fase actual:** Fase 0 — Cimientos (terminada, pendiente de fusionar el PR) → siguiente: Fase 1 — Modelo de datos.
+- **Hecho en Fase 0:** proyecto uv con Python 3.13 y estructura `src/pulseops/`; app FastAPI con `/health` y Swagger; módulo `pulseops/queue/` con ArdiQ aislado; Dockerfile + Docker Compose (API, PostgreSQL 18, Valkey 9) con healthchecks; `ardiq doctor` OK contra Valkey; cambio de httpx a httpx2; ADR-001 a ADR-008 en `docs/decisions.md`.
+- **Pendiente de decidir:** interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
+- **Notas para más adelante:** en el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
+- **Siguiente paso:** fusionar el PR de la Fase 0 y empezar la Fase 1 investigando los campos de un monitor y qué se guarda de cada check.
