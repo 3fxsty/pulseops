@@ -157,3 +157,185 @@ Format: context, options considered, decision, rationale.
 **Rationale.** Actively maintained and the client Starlette now expects. The switch is cheap because no check code exists yet.
 
 **Consequences.** httpx2 verifies TLS certificates against the operating system's trust store (through `truststore`), so the Docker image must ship the system CA certificates. `python:3.13-slim` already includes `ca-certificates`; an HTTPS request from inside the container was verified to work.
+
+---
+
+## ADR-009 — PostgreSQL driver: asyncpg
+
+- **Date:** 2026-10-26 (Phase 1)
+- **Status:** Accepted
+
+**Context.** SQLAlchemy needs a driver to talk to PostgreSQL. The whole stack is async.
+
+**Options.**
+1. **asyncpg** — async-only driver that speaks PostgreSQL's binary protocol.
+2. **psycopg 3** — successor of psycopg2, supports both sync and async.
+
+**Decision.** asyncpg (`postgresql+asyncpg://…`), used by the app and by Alembic (async migration template).
+
+**Rationale.** The binary protocol is the most efficient option for the most write-heavy table (`checks`), and an async-only driver matches a 100 % async stack. Popularity was not a criterion.
+
+---
+
+## ADR-010 — Identifiers: internal integer + public UUID v7
+
+- **Date:** 2026-10-26 (Phase 1)
+- **Status:** Accepted
+
+**Context.** Monitor identifiers end up in API URLs. Changing them later (e.g. when users arrive in Phase 10) would break every client.
+
+**Options.**
+1. **Integer only** — simple and compact, but enumerable and leaks how many monitors exist.
+2. **UUID only** — opaque, but 16 bytes repeated in every row of `checks`.
+3. **Integer internal key + UUID public id.**
+
+**Decision.** Option 3.
+- `monitors.id`: integer identity, used only internally and for foreign keys.
+- `monitors.public_id`: UUID, NOT NULL, UNIQUE, `server_default=uuidv7()` (native in PostgreSQL 18).
+- The API exposes only `public_id` (Phase 2).
+
+**Rationale.** `monitor_id` is repeated in millions of check rows: 4 bytes instead of 16. The public id is stable and opaque from day one, and UUID v7 is time-ordered, so it indexes well.
+
+---
+
+## ADR-011 — `monitors` table
+
+- **Date:** 2026-10-26 (Phase 1)
+- **Status:** Accepted
+
+**Decision.**
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | integer identity | PK |
+| `public_id` | uuid | NOT NULL, UNIQUE, default `uuidv7()` |
+| `name` | varchar(100) | NOT NULL |
+| `url` | varchar(2048) | NOT NULL, UNIQUE (named constraint) |
+| `interval_seconds` | integer | NOT NULL, CHECK 30–86400 |
+| `is_active` | boolean | NOT NULL, default true |
+| `created_at` | timestamptz | NOT NULL, default `now()` |
+| `updated_at` | timestamptz | NOT NULL, default `now()`, `onupdate=func.now()` |
+
+**Rationale.**
+- **Database CHECKs as defence in depth:** invalid data is rejected even if API validation fails.
+- **Named UNIQUE on `url`:** it will become unique per `(owner_id, url)` in Phase 10, and a predictable name makes that change trivial.
+- **URL normalization** happens in the API (Phase 2).
+- **`updated_at`** is set by SQLAlchemy on every UPDATE using the database clock (`func.now()`). All SQL goes through SQLAlchemy (see Security rules), so a trigger would only add hidden logic that `alembic check` cannot see.
+
+**Deliberately left out.**
+- `method`, `timeout_seconds`: the down rule is global and checks are always GET.
+- `next_check_at`, `last_checked_at`: depend on the Phase 4 scheduling decision; they can be added with a later migration.
+
+---
+
+## ADR-012 — `checks` table: composite primary key
+
+- **Date:** 2026-10-26 (Phase 1)
+- **Status:** Accepted
+
+**Context.** ArdiQ delivers tasks at least once, so a check may run twice. This is the largest and most write-heavy table.
+
+**Options.**
+1. **Surrogate `id` bigint** + `checked_at` — duplicates must be prevented in code.
+2. **Composite PK `(monitor_id, scheduled_at)`**, no surrogate id.
+
+**Decision.** Option 2.
+
+| Column | Type | Constraints |
+|---|---|---|
+| `monitor_id` | integer | FK → `monitors.id` ON DELETE CASCADE; part of PK |
+| `scheduled_at` | timestamptz | NOT NULL; part of PK — when the check was *due*, not when it actually ran |
+| `is_up` | boolean | NOT NULL |
+| `status_code` | smallint | NULL, CHECK 100–599 |
+| `response_time_ms` | integer | NULL, CHECK >= 0 |
+| `error_kind` | varchar(32) | NULL, CHECK IN (`timeout`, `dns_error`, `connection_error`, `ssl_error`, `http_error`, `blocked_target`) |
+| `error_detail` | varchar(500) | NULL |
+
+- Coherence CHECK: `is_up = (error_kind IS NULL)`.
+- Indexes: the PK covers per-monitor history queries. A **BRIN** index on `scheduled_at` serves the 30-day retention cleanup, which deletes across all monitors.
+- ORM relationship uses `passive_deletes=True`.
+
+**Rationale.**
+- **Idempotent by design:** a re-executed check hits the PK and is skipped with `ON CONFLICT DO NOTHING` (Phase 4).
+- **Smaller rows** without a surrogate id, and the table is ready for time partitioning or TimescaleDB.
+- **`error_kind` values:** no `too_slow`, because the request timeout equals the 10 s down threshold, so a slow site is a `timeout`. `blocked_target` covers SSRF protection.
+- **Text + CHECK instead of a PostgreSQL ENUM:** ENUMs are awkward to change in migrations.
+- **Cascade done by PostgreSQL**, not the ORM: the ORM would load every check of the monitor into memory.
+- **BRIN** is tiny and suits rows that arrive in time order. A `(monitor_id, checked_at)` B-tree would have duplicated the PK.
+
+---
+
+## ADR-013 — Configuration: pydantic-settings
+
+- **Date:** 2026-10-26 (Phase 1)
+- **Status:** Accepted
+
+**Options.**
+1. **pydantic-settings** — one validated `Settings` class.
+2. **`os.environ`** — no dependency, but config is scattered and unvalidated.
+
+**Decision.** pydantic-settings, in `pulseops/config.py`.
+- Variables: `DATABASE_URL` (app role), `MIGRATION_DATABASE_URL` (owner role), `BROKER_URL` and `ALLOW_PRIVATE_TARGETS` (bool, default `false`, used from Phase 2 for SSRF protection).
+- Secrets and URLs that carry credentials are `SecretStr`.
+
+**Rationale.** Missing or malformed configuration fails at startup with a clear message. `SecretStr` keeps passwords out of logs, tracebacks and reprs.
+
+---
+
+## ADR-014 — Migrations: one-shot `migrate` service and three database roles
+
+- **Date:** 2026-10-26 (Phase 1)
+- **Status:** Accepted
+
+**Context.** Migrations must run before the API/worker start, exactly once. The app should not be able to change the schema.
+
+**Options (when to migrate).**
+1. **One-shot `migrate` service** in Compose.
+2. **On API startup** — replicas and the worker could race.
+3. **Manually** — easy to forget.
+
+**Options (roles).**
+1. **Two roles** — the image superuser owns the schema; an app role handles rows.
+2. **Three roles** — superuser kept for administration only.
+
+**Decision.** A one-shot `migrate` service (`alembic upgrade head`) with three roles:
+- **`postgres`:** superuser, administration only; never used by PulseOps.
+- **`pulseops_owner`:** not a superuser; owns the `pulseops` and `pulseops_test` databases and their schema. Used only by `migrate` and migration tests.
+- **`pulseops_app`:** used by the API and the worker.
+  - Allowed: SELECT/INSERT/UPDATE/DELETE on tables and USAGE/SELECT on sequences, granted through `ALTER DEFAULT PRIVILEGES FOR ROLE pulseops_owner`.
+  - Not allowed: CREATE, ALTER or DROP.
+
+The roles and databases are created by an init script in `docker-entrypoint-initdb.d`, with passwords taken from `.env`. Startup order: `postgres` (healthy) → `migrate` (completed successfully) → `api`.
+
+**Rationale.** Least privilege. A SQL injection through the API could not alter or drop tables. A leaked migration password would be limited to PulseOps' databases instead of the whole server.
+
+---
+
+## ADR-015 — Tests run against real PostgreSQL in a separate database
+
+- **Date:** 2026-10-26 (Phase 1)
+- **Status:** Accepted
+
+**Options.**
+1. **Real PostgreSQL**, in a separate database.
+2. **In-memory SQLite** — faster, but behaves differently (constraints, types, timestamps) and could hide bugs.
+
+**Decision.** Real PostgreSQL in its own database, `pulseops_test`, created by the same init script with the same roles. Tests never touch development data.
+
+---
+
+## ADR-016 — Security baseline
+
+- **Date:** 2026-10-26 (Phase 1)
+- **Status:** Accepted
+
+**Decision.**
+- **Linting:** Ruff runs the `S` rules (flake8-bandit). `assert` and test passwords are allowed only under `tests/`.
+- **Dependencies:** Dependabot watches the `uv`, `docker` and `docker-compose` ecosystems.
+- **Valkey:** requires a password (`--requirepass`); `BROKER_URL` is a `SecretStr`.
+- **Compose secrets:** declared as required (`${VAR:?}`), so the stack refuses to start without a `.env` instead of falling back to weak defaults.
+- **Published ports:** Valkey is not published outside the Docker network. PostgreSQL is published on `127.0.0.1` only, so tests can run from the host.
+- **ArdiQ:** keeps its default msgpack codec, never pickle.
+- **Secret scanning:** push protection is to be enabled on GitHub. It is unavailable for free on private repositories, so it is tracked as pending.
+
+**Rationale.** Cheap measures now, which avoid expensive incidents once there are real data and users. The full set of permanent rules lives in `CLAUDE.md` under "Security".
