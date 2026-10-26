@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+
+# Virtual environment
+.venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+
+# Secrets
+.env
