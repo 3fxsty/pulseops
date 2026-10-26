@@ -1,14 +1,19 @@
+# Secrets come from .env (copy .env.example). They are required on purpose:
+# the stack refuses to start rather than fall back to weak defaults.
+
 services:
   api:
     build: .
+    image: pulseops
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-pulseops}:${POSTGRES_PASSWORD:-pulseops}@postgres:5432/${POSTGRES_DB:-pulseops}
-      BROKER_URL: redis://valkey:6379/0
+      DATABASE_URL: postgresql+asyncpg://pulseops_app:${PULSEOPS_APP_PASSWORD:?set it in .env}@postgres:5432/pulseops
+      BROKER_URL: redis://:${VALKEY_PASSWORD:?set it in .env}@valkey:6379/0
+      ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       valkey:
         condition: service_healthy
     healthcheck:
@@ -17,30 +22,46 @@ services:
       timeout: 3s
       retries: 5
 
+  # One-shot: applies pending migrations as the schema owner, then exits.
+  migrate:
+    build: .
+    image: pulseops
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://pulseops_owner:${PULSEOPS_OWNER_PASSWORD:?set it in .env}@postgres:5432/pulseops
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   postgres:
     image: postgres:18
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-pulseops}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pulseops}
-      POSTGRES_DB: ${POSTGRES_DB:-pulseops}
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set it in .env}
+      PULSEOPS_OWNER_PASSWORD: ${PULSEOPS_OWNER_PASSWORD:?set it in .env}
+      PULSEOPS_APP_PASSWORD: ${PULSEOPS_APP_PASSWORD:?set it in .env}
+    # Published on localhost only, so tests can run from the host.
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      # Over TCP on purpose: during first-time init the server only listens on
+      # the Unix socket, so this stays unhealthy until roles and DBs exist.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres"]
       interval: 5s
       timeout: 3s
       retries: 10
 
   valkey:
     image: valkey/valkey:9
-    ports:
-      - "127.0.0.1:6379:6379"
+    environment:
+      VALKEY_PASSWORD: ${VALKEY_PASSWORD:?set it in .env}
+    command: ["sh", "-c", 'exec valkey-server --requirepass "$$VALKEY_PASSWORD"']
     volumes:
       - valkey-data:/data
     healthcheck:
-      test: ["CMD", "valkey-cli", "ping"]
+      test: ["CMD-SHELL", 'VALKEYCLI_AUTH="$$VALKEY_PASSWORD" valkey-cli ping | grep -q PONG']
       interval: 5s
       timeout: 3s
       retries: 10
