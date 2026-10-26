@@ -123,8 +123,18 @@ Format: context, options considered, decision, rationale.
 ## ADR-007 — Broker: Valkey or Redis
 
 - **Date:** 2026-10-26 (Phase 0)
-- **Status:** Pending — to be settled with `ardiq doctor`
+- **Status:** Accepted
 
 **Context.** ArdiQ only uses features present in Redis 7.2, which Valkey is based on, but Valkey is not officially tested.
 
-**Plan.** Run Valkey in Docker Compose and execute `ardiq doctor`. If it passes, use Valkey; otherwise switch to Redis (one-line change) and report it to the ArdiQ author.
+**Options.**
+1. **Valkey** — open-source (BSD) fork of Redis 7.2, maintained under the Linux Foundation.
+2. **Redis** — the officially tested broker for ArdiQ.
+
+**Plan agreed beforehand.** Run Valkey in Docker Compose and execute `ardiq doctor`. If it passes, use Valkey; otherwise switch to Redis (one-line change) and report it to the ArdiQ author.
+
+**Result.** `ardiq doctor` against `valkey/valkey:9` (Valkey 9.1.2, reports Redis-compatible version 7.2.4) passed every check: connection, version, key writes and Lua scripts. The only warning was "no live workers", which is expected before Phase 4.
+
+**Decision.** Valkey.
+
+**Rationale.** Fully compatible with what ArdiQ needs, and truly open-source. Switching to Redis later only means changing the image in `docker-compose.yml`.
