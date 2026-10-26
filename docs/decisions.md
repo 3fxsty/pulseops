@@ -19,7 +19,7 @@ Format: context, options considered, decision, rationale.
 | Language | Python 3.12+ |
 | Project & dependency management | uv |
 | API | FastAPI (automatic Swagger UI) |
-| HTTP client for checks | httpx (async) |
+| HTTP client for checks | httpx (async) — replaced by httpx2, see ADR-008 |
 | Database | PostgreSQL |
 | ORM & migrations | SQLAlchemy 2 (async) + Alembic |
 | Tests | pytest |
@@ -138,3 +138,22 @@ Format: context, options considered, decision, rationale.
 **Decision.** Valkey.
 
 **Rationale.** Fully compatible with what ArdiQ needs, and truly open-source. Switching to Redis later only means changing the image in `docker-compose.yml`.
+
+---
+
+## ADR-008 — HTTP client: httpx2 instead of httpx
+
+- **Date:** 2026-10-26 (Phase 0)
+- **Status:** Accepted (supersedes the httpx entry in ADR-001)
+
+**Context.** Starlette (FastAPI's foundation) deprecated using `httpx` in its test client and recommends `httpx2`. `httpx` itself is not deprecated, but it is no longer actively maintained. Since httpx is also the client that performs every uptime check, staying on an unmaintained library is a risk.
+
+**Options.**
+1. **Keep httpx** — works today, but unmaintained and flagged by Starlette.
+2. **Switch to httpx2** — actively maintained successor (by the Pydantic organization), same programming model.
+
+**Decision.** httpx2 (2.16.0) for both the checker and the API test client.
+
+**Rationale.** Actively maintained and the client Starlette now expects. The switch is cheap because no check code exists yet.
+
+**Consequences.** httpx2 verifies TLS certificates against the operating system's trust store (through `truststore`), so the Docker image must ship the system CA certificates. `python:3.13-slim` already includes `ca-certificates`; an HTTPS request from inside the container was verified to work.
