@@ -213,7 +213,20 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** Fase 1 — Modelo de datos, **en curso** en la rama `phase-1-data-model`. Las decisiones están tomadas (ADR-009 a ADR-016); falta construir.
+- **Fase actual:** Fase 1 — Modelo de datos, **construida y verificada** en la rama `phase-1-data-model`. Falta que Toni la pruebe y abrir el PR.
+- **Hecho en Fase 1:**
+  - `config.py` con pydantic-settings;
+  - modelos `Monitor` y `Check` en `pulseops/db/`;
+  - migración `0001`, revisada a mano;
+  - servicio `migrate` con 3 roles creados por `docker/postgres/initdb/01-roles.sh`;
+  - Valkey con contraseña y secretos obligatorios en Compose;
+  - Ruff con reglas "S" y Dependabot;
+  - 29 tests sobre `pulseops_test` (restricciones, permisos, migraciones y `alembic check`).
+- **Cambios descubiertos en Fase 1:**
+  - SQLAlchemy 2.1 necesita el extra `sqlalchemy[asyncio]`, porque ya no instala `greenlet` por defecto.
+  - El healthcheck de PostgreSQL va por TCP: durante la primera inicialización solo escucha por socket y `migrate` podría arrancar antes de que existieran los roles.
+  - Los tests async usan el plugin de pytest de anyio (ya viene con FastAPI), sin pytest-asyncio.
+  - Los roles solo se crean al iniciar un volumen vacío: si cambian sus contraseñas en `.env`, hay que recrear el volumen con `docker compose down -v`, que borra los datos.
 - **Hecho en Fase 0:**
   - proyecto uv con Python 3.13 y estructura `src/pulseops/`;
   - app FastAPI con `/health` y Swagger;
@@ -227,4 +240,4 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:** construir la Fase 1 según el plan aprobado. Antes de aplicar la migración, revisarla a mano y enseñarle a Toni un resumen.
+- **Siguiente paso:** Toni prueba la Fase 1 → PR hacia `main`. Después, la Fase 2 (API de monitores) en modo plan (regla 8).
