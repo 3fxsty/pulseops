@@ -1,3 +1,5 @@
+# The base image ships ca-certificates, which httpx2 needs: it verifies TLS
+# against the OS trust store (via truststore). Keep them if the base changes.
 FROM python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /bin/
