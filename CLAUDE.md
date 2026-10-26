@@ -30,6 +30,13 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 9. **Evalúa cada opción por lo que aporta a PulseOps, no por su popularidad.** La popularidad solo sirve para desempatar. Si se descarta algo, explica por qué no compensa ahora y cuándo convendría reevaluarlo.
 10. **Evalúa la seguridad en cada decisión, también a futuro.** Una mala decisión hoy puede costar caro cuando ya haya datos y usuarios. Las reglas permanentes están en la sección "Seguridad".
 11. **Revisa a mano cada migración autogenerada antes de aplicarla** y avisa de cualquier posible pérdida de datos. Por ejemplo, Alembic interpreta un renombrado como borrar + crear.
+12. **Cada recomendación a Toni debe incluir:**
+    - por qué esta opción y por qué no las alternativas;
+    - su punto débil;
+    - si es **fácil o difícil de cambiar después**. Señala explícitamente las decisiones difíciles de revertir (rutas de la API, formato de errores, identificadores, esquema de datos), que son las que más atención merecen.
+
+    Explica también los conceptos necesarios para que Toni pueda cuestionar la recomendación.
+13. **Verifica con tests el comportamiento de las librerías en lugar de suponerlo.** Ejemplo: `ipaddress.is_global` da como públicas direcciones multicast, NAT64 e IPv4-compatible (`::/96`).
 
 ### El ciclo de cada fase
 0. **Planificar** (modo plan): Claude explica qué hay que investigar y decidir en la fase.
@@ -94,11 +101,24 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
   - Escaneo de secretos con push protection en GitHub (ver "Estado actual").
 - **Dependencias** fijadas con `uv.lock`, con Dependabot activo.
 - **Docker:** imágenes ligeras y sin ejecutar como root.
-- **SSRF** (PulseOps visita URLs que da el usuario):
-  - Solo `http` y `https`.
-  - IPs privadas, loopback, link-local y reservadas bloqueadas por defecto; `ALLOW_PRIVATE_TARGETS=true` las permite en instalaciones dentro de una red propia.
-  - Validar en **cada check**, no solo al crear el monitor (por el DNS rebinding), y en **cada redirección** (máximo 5).
+- **SSRF** (PulseOps visita URLs que da el usuario), en `pulseops/security/ssrf.py` (ADR-023):
+  - Solo `http` y `https`, sin credenciales en la URL; se acepta cualquier puerto.
+  - Si el host es un nombre, se resuelve el DNS de forma async con timeout. Se bloquea si **alguna** IP resultante no está permitida. Si el DNS falla, se acepta: el check lo marcará como `dns_error` y se volverá a validar.
+  - Regla de IP permitida:
+    1. Desenvolver las IPv4 escondidas en IPv6: `::ffff:` (mapped), 6to4, Teredo y NAT64 `64:ff9b::/96`. La IPv4 de dentro se valida **también**.
+    2. Permitida solo si `is_global`, no multicast, no `::/96` (IPv4-compatible) y no `64:ff9b:1::/48`. No basta con `is_global`.
+  - El error es genérico: nunca revela la IP ni a qué resuelve un nombre.
+  - `ALLOW_PRIVATE_TARGETS=true` desactiva el bloqueo en instalaciones dentro de una red propia.
+  - Validar al crear y editar (Fase 2), en **cada check** (por el DNS rebinding) y en **cada redirección**, con un máximo de 5 (Fase 3).
   - Verificación SSL siempre activa.
+  - El repositorio solo acepta `ValidatedUrl`, que únicamente crea el paso de validación. Así es imposible guardar por accidente una URL sin validar.
+- **Errores de la API:**
+  - Formato RFC 9457 + campo `code`.
+  - Los 500 son siempre genéricos.
+  - Nunca se devuelve `input`, SQL, nombres de restricciones o tablas, ni trazas.
+- **API key:** obligatoria, de 32 caracteres o más, como `SecretStr` en `ApiSettings` (el worker nunca la ve). Se compara con `secrets.compare_digest` y nunca aparece en logs.
+- **CORS:** desactivado. Si algún día hace falta, solo para dominios concretos, nunca `*`.
+- **Exposición:** la API se publica solo en `127.0.0.1` hasta la Fase 9.
 - **Futuro:**
   - Fase 8: escapar siempre la salida HTML (XSS).
   - Fase 10: filtrar por dueño en una única capa de acceso a datos y limitar el número de monitores por usuario.
@@ -160,11 +180,18 @@ Tablas de monitores y comprobaciones con SQLAlchemy; primera migración con Alem
 
 **Fase 2 — API de monitores**
 CRUD con FastAPI, validaciones (URL válida, intervalo ≥ 30 s), Swagger.
-- Ya decidido:
-  - normalización de la URL (esquema y dominio en minúsculas, etc.) y validación SSRF al crear o editar un monitor;
-  - la API expone **solo `public_id`**, nunca el `id` interno.
-- A decidir: rutas de la API y formato de errores.
-- Terminada cuando: Toni gestiona monitores desde Swagger.
+- Decidido (ADR-017 a ADR-030):
+  - rutas `/api/v1/monitors`, edición solo con PATCH y el campo `id` = `public_id`;
+  - errores RFC 9457 + `code`;
+  - paginación limit/offset;
+  - normalización de URLs, SSRF y `ValidatedUrl`;
+  - API key en `ApiSettings`, router → repositorio, `DOCS_ENABLED`, sin CORS y API solo en `127.0.0.1`.
+- Terminada cuando:
+  - CRUD completo desde Swagger con "Authorize";
+  - las URLs duplicadas "disfrazadas" dan 409, y las internas o con credenciales, 422;
+  - los errores siguen RFC 9457;
+  - tests en verde;
+  - Toni lo prueba.
 
 **Fase 3 — El comprobador**
 Función que visita una URL con httpx2 y devuelve estado, código HTTP y latencia según el criterio de caída.
@@ -173,7 +200,9 @@ Función que visita una URL con httpx2 y devuelve estado, código HTTP y latenci
   - GET sin descargar el cuerpo de la respuesta;
   - verificación SSL siempre activa;
   - el motivo del fallo usa los `error_kind` de la BD (timeout, dns_error, connection_error, ssl_error, http_error, blocked_target).
-- A decidir: seguir redirecciones o no, User-Agent, detalles de timeouts.
+- A decidir:
+  - seguir redirecciones o no, User-Agent y detalles de timeouts;
+  - **resolución DNS**: `loop.getaddrinfo` usa hilos y su timeout no libera el hilo, lo que en cada check importa más que en la API. Comparar con un resolvedor async (por ejemplo, `aiodns`).
 - Terminada cuando: tests cubren web OK, web con error y web lenta.
 
 **Fase 4 — Checks automáticos (ArdiQ)**
@@ -184,6 +213,7 @@ Lanzar los checks según el intervalo de cada monitor y guardar resultados.
 
 **Fase 5 — Estado y estadísticas**
 Endpoints de estado actual, uptime y latencia media; limpieza automática de datos de más de 30 días.
+- Ya decidido: el historial de checks se pagina **por cursor** sobre `(monitor_id, scheduled_at)`, no con offset.
 - A decidir: cálculo del uptime (por número de checks o por tiempo).
 - Terminada cuando: se puede consultar cómo ha ido una web en la última semana.
 
@@ -195,7 +225,14 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - **Fase 7 — Alertas e incidentes:** Telegram, agrupar caídas en incidentes, anti-spam (p. ej. avisar tras N fallos seguidos).
 - **Fase 8 — Interfaz y métricas:** Grafana y/o HTMX; métricas Prometheus.
 - **Fase 9 — Despliegue:** VPS, Nginx o Caddy, dominio, HTTPS, despliegue automático.
+  - En el proxy: límite de tamaño de las peticiones y de intentos fallidos de API key.
+  - Poner la API detrás del proxy y quitar su publicación en `127.0.0.1`.
+  - Decidir `DOCS_ENABLED` en producción.
+  - El SSRF ya contempla un VPS solo IPv6 con DNS64/NAT64.
 - **Fase 10 — Extras:** usuarios y login, página de estado pública, etc.
+  - Sustituir la API key por usuarios.
+  - Filtro por dueño en el repositorio, que es la única capa de acceso a datos.
+  - La restricción `uq_monitors_url` pasa a ser única por `(owner_id, url)`.
 
 ---
 
@@ -213,7 +250,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** Fase 1 — Modelo de datos, **construida y verificada** en la rama `phase-1-data-model`. Falta que Toni la pruebe y abrir el PR.
+- **Fase actual:** Fase 2 — API de monitores, **en curso** en la rama `phase-2-monitors-api`. Las decisiones están tomadas (ADR-017 a ADR-030). Fase 1 cerrada (PR #2 fusionado).
 - **Hecho en Fase 1:**
   - `config.py` con pydantic-settings;
   - modelos `Monitor` y `Check` en `pulseops/db/`;
@@ -240,4 +277,4 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:** Toni prueba la Fase 1 → PR hacia `main`. Después, la Fase 2 (API de monitores) en modo plan (regla 8).
+- **Siguiente paso:** construir la Fase 2 según el plan aprobado.
