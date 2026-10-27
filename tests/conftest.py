@@ -5,8 +5,10 @@ one), migrated as the schema owner and exercised as the app role, exactly as
 in production.
 """
 
+from ipaddress import ip_address
 from pathlib import Path
 
+import httpx2
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -15,7 +17,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from pulseops.api.deps import get_session
+from pulseops.config import ApiSettings
+from pulseops.main import create_app
+from pulseops.security import ssrf
+
 ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
+TEST_API_KEY = "test-api-key-0123456789abcdefghijklmnop"
+# Any public address will do for names a test does not configure.
+DEFAULT_PUBLIC_IP = "93.184.215.14"
 
 
 class DatabaseTestSettings(BaseSettings):
@@ -66,3 +76,50 @@ async def app_engine(migrated_database, db_settings: DatabaseTestSettings):
 async def session(app_engine):
     async with async_sessionmaker(app_engine, expire_on_commit=False)() as session:
         yield session
+
+
+@pytest.fixture
+def fake_dns(monkeypatch) -> dict[str, list[str] | None]:
+    """Simulated DNS, so tests never depend on the network.
+
+    Map a hostname to a list of IPs, or to None to simulate a failed lookup.
+    Names not in the map resolve to a public address.
+    """
+    records: dict[str, list[str] | None] = {}
+
+    async def resolve(host: str):
+        answer = records.get(host, [DEFAULT_PUBLIC_IP])
+        return None if answer is None else [ip_address(ip) for ip in answer]
+
+    monkeypatch.setattr(ssrf, "resolve_host", resolve)
+    return records
+
+
+@pytest.fixture
+def api_key() -> str:
+    return TEST_API_KEY
+
+
+@pytest.fixture
+def app(app_engine):
+    app = create_app(ApiSettings(api_key=TEST_API_KEY, docs_enabled=True))
+    sessionmaker = async_sessionmaker(app_engine, expire_on_commit=False)
+
+    async def test_session():
+        async with sessionmaker() as session:
+            yield session
+
+    app.dependency_overrides[get_session] = test_session
+    return app
+
+
+@pytest.fixture
+async def client(app, fake_dns):
+    """API client authenticated with the test API key."""
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"X-API-Key": TEST_API_KEY},
+    ) as client:
+        yield client

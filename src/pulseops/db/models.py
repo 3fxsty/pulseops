@@ -36,6 +36,9 @@ class Monitor(Base):
             name="interval_seconds_range",
         ),
     )
+    # Fetch server-generated values (public_id, timestamps) with RETURNING on
+    # INSERT and UPDATE, instead of a second query.
+    __mapper_args__ = {"eager_defaults": True}
 
     # Internal key, used for joins; never exposed by the API.
     id: Mapped[int] = mapped_column(Identity(), primary_key=True)

@@ -5,9 +5,12 @@ services:
   api:
     build: .
     image: pulseops
+    # Localhost only until the reverse proxy arrives in Phase 9 (ADR-029).
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
+      API_KEY: ${API_KEY:?set it in .env}
+      DOCS_ENABLED: ${DOCS_ENABLED:-true}
       DATABASE_URL: postgresql+asyncpg://pulseops_app:${PULSEOPS_APP_PASSWORD:?set it in .env}@postgres:5432/pulseops
       BROKER_URL: redis://:${VALKEY_PASSWORD:?set it in .env}@valkey:6379/0
       ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}

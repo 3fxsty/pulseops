@@ -13,10 +13,36 @@ cp .env.example .env   # then replace every change-me value
 docker compose up --build
 ```
 
-Compose refuses to start without the secrets in `.env`. On start-up, the one-shot `migrate` service applies the database migrations and exits. The API starts only after it succeeds.
+Compose refuses to start without the secrets in `.env`, and the API refuses to start without a valid `API_KEY` (at least 32 characters, e.g. `openssl rand -base64 32`). On start-up, the one-shot `migrate` service applies the database migrations and exits. The API starts only after it succeeds.
+
+The API listens on `127.0.0.1:8000` only.
 
 - API health check: <http://localhost:8000/health>
-- Swagger UI: <http://localhost:8000/docs>
+- Swagger UI: <http://localhost:8000/docs>. Click **Authorize** and paste your `API_KEY`.
+
+## API
+
+Every `/api/v1` endpoint requires the `X-API-Key` header.
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/v1/monitors` | Create a monitor (201 + `Location`) |
+| GET | `/api/v1/monitors?limit=50&offset=0&is_active=true` | List monitors, paginated |
+| GET | `/api/v1/monitors/{id}` | Get a monitor |
+| PATCH | `/api/v1/monitors/{id}` | Change only the fields sent (e.g. `{"is_active": false}` to pause) |
+| DELETE | `/api/v1/monitors/{id}` | Delete a monitor and its check history |
+
+URLs are stored normalized. They are refused when they embed credentials or point to private, internal or reserved addresses (SSRF protection; set `ALLOW_PRIVATE_TARGETS=true` for installs that must check a private network).
+
+Errors use [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) Problem Details (`application/problem+json`) with a stable `code`:
+
+| Status | `code` |
+|---|---|
+| 401 | `unauthorized` |
+| 404 | `monitor_not_found`, `not_found` |
+| 409 | `monitor_url_conflict` |
+| 422 | `validation_error`, `url_credentials_not_allowed`, `url_target_not_allowed` |
+| 500 | `internal_error` |
 
 ## Database
 
