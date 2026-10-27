@@ -3,10 +3,13 @@
 Tasks still go through msgpack, the lifespan and the registry, as on a worker.
 """
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlsplit
 
 import pytest
+from ardiq import Ardiq
 from ardiq.testing import inline
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -102,3 +105,32 @@ async def test_scheduler_tick_survives_a_broken_broker(worker, session, monkeypa
     # Nothing was lost: the monitor is still due for the same slot.
     await session.refresh(monitor)
     assert monitor.next_check_at <= await session.scalar(select(func.now()))
+
+
+async def test_scheduler_error_log_never_shows_the_broker_password(
+    worker, session, test_broker_url, monkeypatch, caplog, capfd
+):
+    # A real ArdiQ against the real Valkey with a wrong password: the error
+    # it raises is what the scheduler logs. Slow (~10 s): ArdiQ retries the
+    # connection before giving up, and has no option to shorten that.
+    password = "wrong-password-0123456789"
+    real = urlsplit(test_broker_url)
+    broken = Ardiq(
+        redis_url=f"redis://:{password}@{real.hostname}:{real.port}/1",
+        queue_name=f"pulseops_test_{uuid.uuid4()}",
+    )
+
+    async def enqueue(due):
+        await broken.send("check_monitor", 1, 2)
+
+    monkeypatch.setattr(tasks, "enqueue_checks", enqueue)
+    await add_monitor(session)
+    caplog.set_level(logging.DEBUG)
+
+    async with inline(worker):
+        assert await tasks.schedule_checks() == 0
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("scheduling failed" in message for message in errors)
+    output = capfd.readouterr()
+    assert password not in caplog.text + output.out + output.err
