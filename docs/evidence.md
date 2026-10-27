@@ -2,7 +2,7 @@
 
 Verified facts about PulseOps, recorded as the project grows. Every entry comes from a command, an automated test or a manual check that was actually run, never from memory or estimates. Each one says when and how it was verified, so it can be reproduced.
 
-Updated at the close of every phase (and whenever a verified fact changes).
+Updated at the close of every phase (and whenever a verified fact changes). It contains no personal data or details of any local network: placeholders such as `<local IP>` are used instead.
 
 ---
 
@@ -69,8 +69,8 @@ grep -c "^## ADR-" docs/decisions.md
 | 2026-10-26 | Valkey without password | `NOAUTH Authentication required`; `ardiq doctor` OK with password (and masks it as `***`) |
 | 2026-10-27 | Manual test list for Phase 2, 22 cases, live stack | **22/22 as expected**: auth, normalization, 409 on disguised duplicate, 422 on metadata/localhost/`postgres`/`0x7f.1`/`[::ffff:127.0.0.1]`/credentials/forbidden field, pagination, PATCH including SSRF backdoor, 404/204 |
 | 2026-10-27 | `http://postgres:5432/` (Docker service name) | Blocked by SSRF: it resolves to a private IP inside the Docker network |
-| 2026-10-27 | Reachability of `127.0.0.1:8000` | Reachable from Windows (`curl.exe` → `/docs` 200); **not** reachable on the network IP (`192.168.1.36:8000` → no answer) |
-| 2026-10-26/27 | Phases 0, 1 and 2 tested by Toni | Swagger `/health` 200 (Phase 0); `psql` checks (Phase 1); manual list (Phase 2) |
+| 2026-10-27 | Reachability of `127.0.0.1:8000` | Reachable from the host's browser (`/docs` → 200); **not** reachable on the machine's network address (`<local IP>:8000` → no answer) |
+| 2026-10-26/27 | Phases 0, 1 and 2 tested by the project owner | Swagger `/health` 200 (Phase 0); `psql` checks (Phase 1); manual list (Phase 2) |
 
 ## Library behaviour verified (instead of assumed)
 

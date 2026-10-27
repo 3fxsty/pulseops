@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Uptime monitoring for websites and APIs"
 readme = "README.md"
 authors = [
-    { name = "17fastyyy", email = "3fxsty@proton.me" }
+    { name = "3fxsty" }
 ]
 requires-python = ">=3.13"
 dependencies = [

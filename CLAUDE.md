@@ -41,6 +41,8 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
     - Solo datos oficiales que salgan de un comando, un test o una prueba realmente hecha, con fecha y forma de reproducirlos. Nunca estimaciones ni datos de memoria.
     - Al cerrar cada fase: añadir su fila a la tabla por fases (tests, Ruff, ADRs, verificación manual) y actualizar el desglose de tests, las garantías, las versiones y el tamaño.
     - Cada hallazgo sobre una librería o comportamiento verificado va también a su tabla.
+    - **Sin datos personales ni de la red de Toni:** nada de IPs locales, rutas de su ordenador, nombre de usuario, email o sistema operativo de su equipo. En su lugar se usan marcadores como `<local IP>`.
+    - Tiene que poder leerse **tal cual cuando el repo sea público**.
 15. **Nada sale de git sin el OK de Toni.**
     - **Antes de cada commit**, enséñale:
       - qué archivos cambian;
