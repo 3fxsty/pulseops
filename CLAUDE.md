@@ -63,6 +63,10 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
     - **Lo mismo antes de cada push y de abrir cada PR:** enséñale qué se sube, o el título y la descripción del PR, y espera su OK.
     - **Sin líneas de atribución:** ni los commits ni los PR llevan "Co-Authored-By: Claude", "Generated with Claude Code" ni ninguna otra. Está desactivado también en `~/.claude/settings.json` (`attribution`).
 
+16. **Construye poco a poco y explica cada paso sobre la marcha.** Al salir del modo plan, no lo construyas todo para explicarlo al final, porque eso satura.
+    - Avanza en pasos pequeños: añade una pieza y explícala en ese momento ("he añadido esto, hace tal y tal") con el tono de la regla 15. Después sigue con la siguiente.
+    - Cada explicación debe ser corta, para que Toni pueda seguir el hilo y preguntar antes de que se acumulen cosas.
+
 ### El ciclo de cada fase
 0. **Planificar** (modo plan): Claude explica qué hay que investigar y decidir en la fase.
 1. **Investigar**: qué necesitamos y qué opciones existen.
@@ -284,7 +288,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** Fase 3 — El comprobador, **construida y verificada** en la rama `phase-3-checker` (sin subir). Falta que Toni la pruebe, aprobar los commits pendientes y el PR. Fase 2 cerrada (PR #3).
+- **Fase actual:** Fase 4 — Checks automáticos (ArdiQ), **no empezada**: falta el modo plan. Rama `phase-4-automatic-checks` creada desde `main`. Fase 3 cerrada (PR #4 fusionado el 2026-10-27).
 - **Hecho en Fase 3:**
   - `pulseops/checker/` (`Checker`, `CheckOutcome`, backend de red con IP fijada, comando `python -m pulseops.checker`);
   - DNS en un pool de hilos propio;
@@ -339,4 +343,4 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:** Toni prueba la Fase 3 y aprueba los commits (regla 15); después, push y PR con su OK. Luego, la Fase 4 en modo plan.
+- **Siguiente paso:** la Fase 4 en modo plan (regla 8). Es la decisión clave del MVP: un cron global que mira qué monitores tocan o una tarea programada por monitor. Los cambios sin commit de este archivo y de `docs/evidence.md` (cierre de la Fase 3 y regla 16) van en el primer commit de la rama, con el OK de Toni.

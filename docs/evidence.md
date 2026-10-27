@@ -13,7 +13,7 @@ Updated at the close of every phase (and whenever a verified fact changes). It c
 | 0 — Foundations | PR #1, 2026-10-26 | 1 passed | clean | 8 | `/health` 200, Swagger 200, `ardiq doctor` OK on Valkey |
 | 1 — Data model | PR #2, 2026-10-26 | 29 passed | clean (with `S` rules) | 16 | Clean-volume start, `\d checks`, downgrade/upgrade, `alembic check` |
 | 2 — Monitors API | PR #3, 2026-10-27 | 143 passed | clean (with `S` rules) | 30 | Manual test list: 22/22 against the live stack |
-| 3 — Checker | pending | 170 passed, 95 % coverage | clean (with `S` rules) | 38 | Checker inside the container against real sites; smoke test 22/22 |
+| 3 — Checker | PR #4, 2026-10-27 | 170 passed, 95 % coverage | clean (with `S` rules) | 38 | Checker inside the container against real sites; smoke test 22/22 |
 
 Reproduce the current numbers:
 
