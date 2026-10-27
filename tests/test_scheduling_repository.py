@@ -1,5 +1,6 @@
 """Claiming due monitors, against the real database (row locks included)."""
 
+import asyncio
 import uuid
 from datetime import timedelta
 
@@ -7,7 +8,9 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from pulseops.checker import CheckOutcome
 from pulseops.db.models import Monitor
+from pulseops.repositories.checks import record_check
 from pulseops.repositories.scheduling import claim_due_monitors
 
 pytestmark = pytest.mark.anyio
@@ -108,6 +111,29 @@ async def test_two_schedulers_never_claim_the_same_monitor(app_engine, session):
 
     monitor = await reload(session, monitor)
     assert monitor.next_check_at == slot + timedelta(seconds=60)
+
+
+async def test_a_claimed_monitor_still_accepts_checks(app_engine, session):
+    # While the scheduler holds its claim (enqueueing), a check that finishes
+    # for that monitor must be stored without waiting for the commit.
+    monitor = await add_monitor(session, due_in=timedelta(seconds=-1))
+    sessions = async_sessionmaker(app_engine)
+    outcome = CheckOutcome(is_up=True, status_code=200, response_time_ms=1)
+
+    async with sessions() as scheduler, sessions() as worker:
+        await claim_due_monitors(scheduler)
+        stored = await asyncio.wait_for(
+            record_check(
+                worker,
+                monitor_id=monitor.id,
+                scheduled_at=monitor.next_check_at,
+                outcome=outcome,
+            ),
+            timeout=2,
+        )
+        await scheduler.commit()
+
+    assert stored is True
 
 
 async def test_rolled_back_claim_is_claimed_again_with_the_same_slot(

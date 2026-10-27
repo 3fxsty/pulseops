@@ -61,6 +61,11 @@ async def get_monitor(session: AsyncSession, public_id: UUID) -> Monitor | None:
     return await session.scalar(select(Monitor).where(Monitor.public_id == public_id))
 
 
+async def get_monitor_by_id(session: AsyncSession, monitor_id: int) -> Monitor | None:
+    """By internal id: for the worker, never for anything the API exposes."""
+    return await session.get(Monitor, monitor_id)
+
+
 async def list_monitors(
     session: AsyncSession,
     *,

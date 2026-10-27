@@ -8,6 +8,7 @@ the blocked_target tests and by test_ssrf.py.
 import asyncio
 import dataclasses
 import json
+import logging
 import socket
 import ssl
 import time
@@ -197,6 +198,18 @@ async def test_sends_the_pulseops_user_agent(server, checker):
     assert server.requests[0]["user-agent"] == (
         f"PulseOps/{version('pulseops')} (uptime monitor)"
     )
+
+
+async def test_urls_never_reach_the_logs(server, checker, caplog):
+    # httpx2 logs every request URL at INFO, and httpcore2 traces at DEBUG.
+    # The worker runs with INFO (DEBUG with -v), and URLs may carry tokens.
+    caplog.set_level(logging.DEBUG)
+
+    outcome = await checker.check(server.url("/redirect/1?token=s3cr3t-t0ken"))
+
+    assert outcome.is_up
+    assert "s3cr3t-t0ken" not in caplog.text
+    assert "/redirect/" not in caplog.text
 
 
 async def test_refused_connection_is_connection_error(checker):

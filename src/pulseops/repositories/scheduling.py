@@ -18,6 +18,7 @@ class DueCheck:
     monitor_id: int
     # When the check was due (becomes checks.scheduled_at), not "now".
     scheduled_at: datetime
+    interval_seconds: int
 
 
 async def claim_due_monitors(
@@ -28,7 +29,8 @@ async def claim_due_monitors(
     Does NOT commit: the caller enqueues the checks first and commits after,
     so a failed enqueue rolls back and the next tick claims the same slots.
 
-    - FOR UPDATE SKIP LOCKED: two schedulers never claim the same monitor.
+    - FOR NO KEY UPDATE SKIP LOCKED: two schedulers never claim the same
+      monitor; the second skips the rows the first has locked.
     - Missed slots are skipped, keeping each monitor's rhythm: the next slot
       is the old one plus the fewest whole intervals that land in the future.
     - Times come from the database clock (now() = transaction start).
@@ -38,7 +40,10 @@ async def claim_due_monitors(
         .where(Monitor.is_active, Monitor.next_check_at <= func.now())
         .order_by(Monitor.next_check_at)
         .limit(limit)
-        .with_for_update(skip_locked=True)
+        # NO KEY UPDATE (not plain UPDATE): ids never change here, so checks
+        # being inserted for these monitors (a foreign key share lock) are
+        # not blocked while the batch is enqueued.
+        .with_for_update(skip_locked=True, key_share=True)
         .cte("due")
     )
     elapsed = func.extract("epoch", func.now() - due.c.next_check_at)
@@ -51,12 +56,12 @@ async def claim_due_monitors(
         .where(Monitor.id == due.c.id)
         # Scheduling is not an edit: keep updated_at as it is.
         .values(next_check_at=next_check_at, updated_at=Monitor.updated_at)
-        .returning(Monitor.id, due.c.next_check_at)
+        .returning(Monitor.id, due.c.next_check_at, Monitor.interval_seconds)
         .execution_options(synchronize_session=False)
     )
     rows = await session.execute(claim)
     # UPDATE ... RETURNING does not keep the CTE's order: sort, oldest first.
     return sorted(
-        (DueCheck(monitor_id, scheduled_at) for monitor_id, scheduled_at in rows),
+        (DueCheck(*row) for row in rows),
         key=lambda due_check: due_check.scheduled_at,
     )

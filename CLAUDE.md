@@ -245,7 +245,7 @@ Función que visita una URL con httpx2 y devuelve estado, código HTTP y latenci
 Lanzar los checks según el intervalo de cada monitor y guardar resultados.
 - Ya decidido: los checks se insertan con `ON CONFLICT DO NOTHING` sobre la PK `(monitor_id, scheduled_at)`, que los hace idempotentes frente a las reejecuciones de ArdiQ. `scheduled_at` es la hora en que tocaba el check, no la real.
 - Decidido en el plan (los ADR se escriben al construir):
-  - **Planificador global:** un `@app.cron(every=5, coalesce=True)` reclama los monitores con `next_check_at <= now()` (columna nueva en `monitors`, migración `0002`) con `FOR UPDATE SKIP LOCKED`, como máximo 500 por turno. Encola `check_monitor(monitor_id, scheduled_at_ms)` con id fijo `check:<id>:<ms>` **antes** del commit: si encolar falla, rollback y el siguiente turno lo reintenta. La agenda vive en PostgreSQL, no en Valkey.
+  - **Planificador global:** un `@app.cron(every=5, coalesce=True)` reclama los monitores con `next_check_at <= now()` (columna nueva en `monitors`, migración `0002`) con `FOR NO KEY UPDATE SKIP LOCKED`, como máximo 500 por turno. Encola `check_monitor(monitor_id, scheduled_at_us)` con id fijo `check:<id>:<µs>` **antes** del commit: si encolar falla, rollback y el siguiente turno lo reintenta. La agenda vive en PostgreSQL, no en Valkey.
   - **Siguiente turno:** `anterior + k × intervalo`; los periodos perdidos se saltan sin perder el ritmo de cada monitor.
   - **Al crear, al cambiar la URL o el intervalo, o al reactivar:** `next_check_at = now()`. Planificar no cambia `updated_at`.
   - **La tarea:**
@@ -302,6 +302,13 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 ## Estado actual
 
 - **Fase actual:** Fase 4 — Checks automáticos (ArdiQ), **en construcción** en la rama `phase-4-automatic-checks`. El plan está aprobado: decisiones en el roadmap. Fase 3 cerrada (PR #4 fusionado el 2026-10-27).
+- **Cambios descubiertos en Fase 4 (durante la construcción):**
+  - **httpx2 registra cada URL visitada a nivel INFO** (`HTTP Request: GET <url>`), y httpcore2 da aún más detalle a nivel DEBUG. Como `ardiq run` muestra INFO, los tokens de las URLs habrían acabado en los logs. El comprobador sube esos dos loggers a WARNING. Hay un test que lo demuestra.
+  - **SQLAlchemy mete los parámetros de la consulta en sus mensajes de error**, y estos podrían incluir el `error_detail` con la URL. ArdiQ guarda el error de cada tarea fallida en su log y en la cola de fallidas. Por eso el motor usa `hide_parameters=True`. El `BrokerError` de ArdiQ no muestra la contraseña de Valkey.
+  - **`UPDATE … RETURNING` no conserva el orden del `CTE`.** Un test fallaba de forma aleatoria; ahora se ordena en Python.
+  - **La reclamación usa `FOR NO KEY UPDATE`, no `FOR UPDATE`.** Con el candado fuerte, guardar un check de un monitor reclamado esperaba al commit del planificador, porque la clave foránea pide un candado compartido. Hay un test que lo demuestra.
+  - **`scheduled_at` viaja en microsegundos, no en milisegundos.** PostgreSQL guarda microsegundos, y con milisegundos el check no caería exactamente en el turno reclamado.
+  - **Añadir `next_check_at` con `DEFAULT now()` no reescribe la tabla:** `now()` no es volátil, así que PostgreSQL lo guarda como valor por defecto (`atthasmissing`). Comprobado en PostgreSQL 18.
 - **Hecho en Fase 3:**
   - `pulseops/checker/` (`Checker`, `CheckOutcome`, backend de red con IP fijada, comando `python -m pulseops.checker`);
   - DNS en un pool de hilos propio;

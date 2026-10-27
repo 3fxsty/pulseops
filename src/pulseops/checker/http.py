@@ -1,6 +1,7 @@
 """Visit a URL and decide whether it is up (ADR-003, ADR-031 to ADR-037)."""
 
 import asyncio
+import logging
 import ssl
 import time
 from importlib.metadata import version
@@ -24,6 +25,12 @@ from pulseops.security.ssrf import resolve_host
 CHECK_DEADLINE_SECONDS = 10.0
 MAX_REDIRECTS = 5
 USER_AGENT = f"PulseOps/{version('pulseops')} (uptime monitor)"
+
+# httpx2 logs every request URL at INFO and httpcore2 traces it at DEBUG.
+# Monitor URLs may carry tokens, so whatever the process's logging setup
+# (the worker logs at INFO, DEBUG with -v), these only report warnings.
+for _name in ("httpx2", "httpcore2"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 
 
 def _is_ssl_failure(error: BaseException) -> bool:
