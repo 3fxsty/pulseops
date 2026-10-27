@@ -1,5 +1,6 @@
-import asyncio
 import socket
+import threading
+import time
 from ipaddress import ip_address
 
 import pytest
@@ -110,23 +111,38 @@ async def test_error_never_reveals_the_address(fake_dns):
 
 @pytest.mark.anyio
 async def test_resolve_returns_none_when_lookup_fails(monkeypatch):
-    async def failing(*args, **kwargs):
+    def failing(host):
         raise socket.gaierror("Name or service not known")
 
-    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", failing)
+    monkeypatch.setattr(ssrf, "_getaddrinfo", failing)
 
     assert await resolve_host("nowhere.example") is None
 
 
 @pytest.mark.anyio
 async def test_resolve_returns_none_on_timeout(monkeypatch):
-    async def hanging(*args, **kwargs):
-        await asyncio.sleep(10)
+    def hanging(host):
+        time.sleep(0.3)  # a blocked thread, like a stuck DNS server
+        return []
 
-    monkeypatch.setattr(asyncio.get_running_loop(), "getaddrinfo", hanging)
+    monkeypatch.setattr(ssrf, "_getaddrinfo", hanging)
     monkeypatch.setattr(ssrf, "DNS_TIMEOUT_SECONDS", 0.01)
 
     assert await resolve_host("slow.example") is None
+
+
+@pytest.mark.anyio
+async def test_resolve_uses_its_own_thread_pool(monkeypatch):
+    seen = []
+
+    def recording(host):
+        seen.append(threading.current_thread().name)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.8.8", 0))]
+
+    monkeypatch.setattr(ssrf, "_getaddrinfo", recording)
+
+    assert await resolve_host("public.example") == [ip_address("8.8.8.8")]
+    assert seen[0].startswith("pulseops-dns")
 
 
 # --- validate_monitor_url: disguised internal URLs ---

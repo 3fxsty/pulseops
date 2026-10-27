@@ -6,11 +6,19 @@ every redirect, because DNS answers can change after a monitor is created.
 
 import asyncio
 import socket
+from concurrent.futures import ThreadPoolExecutor
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
 
 from pulseops.security.errors import UrlTargetNotAllowedError
 
 DNS_TIMEOUT_SECONDS = 2.5
+DNS_MAX_THREADS = 16
+
+# getaddrinfo blocks, so it runs in threads. A pool of its own means a stuck
+# DNS server can never starve the rest of the process of threads (ADR-036).
+_dns_executor = ThreadPoolExecutor(
+    max_workers=DNS_MAX_THREADS, thread_name_prefix="pulseops-dns"
+)
 
 # ipaddress.is_global reports these as public, so they need explicit rules.
 IPV4_COMPATIBLE = ip_network("::/96")  # deprecated, e.g. ::127.0.0.1
@@ -49,15 +57,20 @@ async def resolve_host(host: str) -> list[IPAddress] | None:
     """Resolve a hostname without blocking the event loop.
 
     Returns None when the name does not resolve or the lookup times out.
-    getaddrinfo runs in a worker thread, which the timeout does not free.
+    The timeout frees the caller, not the thread: it stays busy until the
+    system resolver gives up.
     """
     loop = asyncio.get_running_loop()
     try:
         async with asyncio.timeout(DNS_TIMEOUT_SECONDS):
-            infos = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            infos = await loop.run_in_executor(_dns_executor, _getaddrinfo, host)
     except (TimeoutError, OSError):
         return None
     return [ip_address(info[4][0]) for info in infos]
+
+
+def _getaddrinfo(host: str) -> list:
+    return socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
 
 
 async def check_target(host: str, *, allow_private: bool) -> None:
