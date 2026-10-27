@@ -6,11 +6,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pulseops.checker.outcome import down, up
-from pulseops.db.models import Check, Monitor
+from pulseops.db.models import Check, Monitor, SchedulerHeartbeat
 from pulseops.db.session import get_engine
+from pulseops.repositories.scheduling import get_scheduler_last_success
 from pulseops.scheduling import run_check, schedule_due_checks
 
 pytestmark = pytest.mark.anyio
@@ -55,6 +57,15 @@ class FakeChecker:
 # --- schedule_due_checks ---
 
 
+async def last_success(sessions):
+    async with sessions() as session:
+        return await get_scheduler_last_success(session)
+
+
+async def nothing_to_enqueue(due):
+    raise AssertionError("nothing should be enqueued")
+
+
 async def test_due_monitors_are_enqueued_and_moved_on(session, sessions):
     monitor = await add_monitor(session)
     enqueued = []
@@ -74,10 +85,7 @@ async def test_due_monitors_are_enqueued_and_moved_on(session, sessions):
 async def test_nothing_due_enqueues_nothing(session, sessions):
     await add_monitor(session, due=False)
 
-    async def enqueue(due):
-        raise AssertionError("nothing should be enqueued")
-
-    assert await schedule_due_checks(sessions, enqueue) == 0
+    assert await schedule_due_checks(sessions, nothing_to_enqueue) == 0
 
 
 async def test_failed_enqueue_loses_no_check(session, sessions):
@@ -100,6 +108,40 @@ async def test_failed_enqueue_loses_no_check(session, sessions):
 
     await schedule_due_checks(sessions, enqueue)
     assert [d.scheduled_at for d in retried] == [slot]
+
+
+async def test_an_empty_tick_still_moves_the_heartbeat(sessions):
+    # No monitor is due: PulseOps is quiet, not dead.
+    assert await last_success(sessions) is None
+
+    await schedule_due_checks(sessions, nothing_to_enqueue)
+    first = await last_success(sessions)
+    await schedule_due_checks(sessions, nothing_to_enqueue)
+    second = await last_success(sessions)
+
+    assert first is not None
+    assert second > first
+
+
+async def test_a_failed_enqueue_does_not_move_the_heartbeat(session, sessions):
+    await schedule_due_checks(sessions, nothing_to_enqueue)
+    before = await last_success(sessions)
+    await add_monitor(session)
+
+    async def broken_enqueue(due):
+        raise ConnectionError("broker unreachable")
+
+    with pytest.raises(ConnectionError):
+        await schedule_due_checks(sessions, broken_enqueue)
+
+    assert await last_success(sessions) == before
+
+
+async def test_the_heartbeat_is_a_single_row(session):
+    session.add(SchedulerHeartbeat(id=2, last_success_at=func.now()))
+
+    with pytest.raises(IntegrityError, match="ck_scheduler_heartbeat_single_row"):
+        await session.commit()
 
 
 # --- run_check ---

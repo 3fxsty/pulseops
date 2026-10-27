@@ -14,7 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from pulseops.checker import CheckOutcome
 from pulseops.repositories.checks import record_check
 from pulseops.repositories.monitors import get_monitor_by_id
-from pulseops.repositories.scheduling import DueCheck, claim_due_monitors
+from pulseops.repositories.scheduling import (
+    DueCheck,
+    claim_due_monitors,
+    record_scheduler_success,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +31,7 @@ class Checker(Protocol):
 
 
 async def schedule_due_checks(sessions: Sessions, enqueue: Enqueue) -> int:
-    """Claim the due monitors, enqueue their checks, then commit.
+    """Claim the due monitors, enqueue their checks, stamp the heartbeat, commit.
 
     Enqueue first, commit after: if enqueueing fails, the claim rolls back
     and the next tick claims the same slots again, so no check is lost. If
@@ -38,6 +42,8 @@ async def schedule_due_checks(sessions: Sessions, enqueue: Enqueue) -> int:
         due = await claim_due_monitors(session)
         if due:
             await enqueue(due)  # raises -> leaving the block rolls back
+        # Even with nothing due: a quiet PulseOps must not look dead.
+        await record_scheduler_success(session)
         await session.commit()
     return len(due)
 

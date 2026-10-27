@@ -5,9 +5,10 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pulseops.db.models import Monitor
+from pulseops.db.models import Monitor, SchedulerHeartbeat
 
 # Most monitors claimed per scheduler tick; the rest wait for the next one.
 CLAIM_BATCH_SIZE = 500
@@ -65,3 +66,25 @@ async def claim_due_monitors(
         (DueCheck(*row) for row in rows),
         key=lambda due_check: due_check.scheduled_at,
     )
+
+
+async def record_scheduler_success(session: AsyncSession) -> None:
+    """Stamp the heartbeat with the database clock. Does NOT commit.
+
+    Called in the tick's own transaction, so it only lands if the tick
+    commits: a tick that fails to enqueue leaves the old time in place.
+    """
+    statement = (
+        insert(SchedulerHeartbeat)
+        .values(id=1, last_success_at=func.now())
+        .on_conflict_do_update(
+            index_elements=[SchedulerHeartbeat.id],
+            set_={"last_success_at": func.now()},
+        )
+    )
+    await session.execute(statement)
+
+
+async def get_scheduler_last_success(session: AsyncSession) -> datetime | None:
+    """When the scheduler last completed a tick; None if it never has."""
+    return await session.scalar(select(SchedulerHeartbeat.last_success_at))

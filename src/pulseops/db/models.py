@@ -108,3 +108,21 @@ class Check(Base):
     error_detail: Mapped[str | None] = mapped_column(String(500))
 
     monitor: Mapped[Monitor] = relationship(back_populates="checks")
+
+
+class SchedulerHeartbeat(Base):
+    """A single row: when the scheduler last completed a tick.
+
+    Written in the same transaction as each tick's claim, empty ticks
+    included, so it only moves when scheduling really works. Lets the API
+    (Phase 7, /health) tell a quiet PulseOps from a dead one without access
+    to Valkey.
+    """
+
+    __tablename__ = "scheduler_heartbeat"
+    __table_args__ = (CheckConstraint("id = 1", name="single_row"),)
+
+    id: Mapped[int] = mapped_column(
+        SmallInteger, primary_key=True, autoincrement=False, server_default=text("1")
+    )
+    last_success_at: Mapped[datetime]

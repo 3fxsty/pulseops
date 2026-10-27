@@ -80,6 +80,7 @@ async def app_engine(migrated_database, db_settings: DatabaseTestSettings):
     async with engine.begin() as connection:
         # Checks go with their monitor (ON DELETE CASCADE).
         await connection.execute(text("DELETE FROM monitors"))
+        await connection.execute(text("DELETE FROM scheduler_heartbeat"))
     await engine.dispose()
 
 
