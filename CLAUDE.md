@@ -37,6 +37,31 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 
     Explica también los conceptos necesarios para que Toni pueda cuestionar la recomendación.
 13. **Verifica con tests el comportamiento de las librerías en lugar de suponerlo.** Ejemplo: `ipaddress.is_global` da como públicas direcciones multicast, NAT64 e IPv4-compatible (`::/96`).
+14. **Mantén `docs/evidence.md` (registro de datos verificados) al día.**
+    - Solo datos oficiales que salgan de un comando, un test o una prueba realmente hecha, con fecha y forma de reproducirlos. Nunca estimaciones ni datos de memoria.
+    - Al cerrar cada fase: añadir su fila a la tabla por fases (tests, Ruff, ADRs, verificación manual) y actualizar el desglose de tests, las garantías, las versiones y el tamaño.
+    - Cada hallazgo sobre una librería o comportamiento verificado va también a su tabla.
+    - **Sin datos personales ni de la red de Toni:** nada de IPs locales, rutas de su ordenador, nombre de usuario, email o sistema operativo de su equipo. En su lugar se usan marcadores como `<local IP>`.
+    - Tiene que poder leerse **tal cual cuando el repo sea público**.
+15. **Nada sale de git sin el OK de Toni.**
+    - **Antes de cada commit**, enséñale:
+      - qué archivos cambian;
+      - un resumen de los cambios;
+      - el mensaje de commit propuesto.
+
+      Después, espera su OK.
+    - **Explica cada cosa técnica del commit** (lo que se añade, se cambia o se crea):
+      - **Tono:** informal, nada profesional, como si se lo contaras a alguien que está aprendiendo, con ejemplos de andar por casa si ayudan.
+      - **Términos técnicos:** cada uno se explica en la misma frase.
+      - **Extensión:** pocas líneas por cosa; solo se profundiza si Toni lo pide.
+      - **Formato por cada cambio:**
+        - **Qué es:** una frase sencilla.
+        - **Para qué sirve:** el problema que resuelve.
+        - **Por qué así:** por qué esta forma y no otra (si aplica).
+      - **Ejemplo:** "`trust_env=False`: le dice al programa que ignore los proxies configurados en el sistema. Sirve para que nadie pueda desviar nuestras visitas por otro sitio y saltarse el control de seguridad. Por qué así: si hiciera caso al proxy, comprobaríamos la dirección del proxy en vez de la de la web."
+      - **Si el commit solo tiene documentación o formato**, basta con una línea que lo diga.
+    - **Lo mismo antes de cada push y de abrir cada PR:** enséñale qué se sube, o el título y la descripción del PR, y espera su OK.
+    - **Sin líneas de atribución:** ni los commits ni los PR llevan "Co-Authored-By: Claude", "Generated with Claude Code" ni ninguna otra. Está desactivado también en `~/.claude/settings.json` (`attribution`).
 
 ### El ciclo de cada fase
 0. **Planificar** (modo plan): Claude explica qué hay que investigar y decidir en la fase.
@@ -111,6 +136,7 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
   - El error es genérico: nunca revela la IP ni a qué resuelve un nombre.
   - `ALLOW_PRIVATE_TARGETS=true` desactiva el bloqueo en instalaciones dentro de una red propia.
   - Validar al crear y editar (Fase 2), en **cada check** (por el DNS rebinding) y en **cada redirección**, con un máximo de 5 (Fase 3).
+  - En el comprobador, la validación se hace **al abrir cada conexión TCP**, con la IP fijada (ADR-031): se resuelve, se validan todas las IPs y se conecta a una de esas mismas. El cliente HTTP usa `trust_env=False` (ignora `HTTP(S)_PROXY`) y no reutiliza conexiones.
   - Verificación SSL siempre activa.
   - El repositorio solo acepta `ValidatedUrl`, que únicamente crea el paso de validación. Así es imposible guardar por accidente una URL sin validar.
 - **Errores de la API:**
@@ -196,15 +222,20 @@ CRUD con FastAPI, validaciones (URL válida, intervalo ≥ 30 s), Swagger.
 
 **Fase 3 — El comprobador**
 Función que visita una URL con httpx2 y devuelve estado, código HTTP y latencia según el criterio de caída.
-- Ya decidido:
-  - validación SSRF en cada check y en cada redirección (máximo 5);
-  - GET sin descargar el cuerpo de la respuesta;
-  - verificación SSL siempre activa;
-  - el motivo del fallo usa los `error_kind` de la BD (timeout, dns_error, connection_error, ssl_error, http_error, blocked_target).
-- A decidir:
-  - seguir redirecciones o no, User-Agent y detalles de timeouts;
-  - **resolución DNS**: `loop.getaddrinfo` usa hilos y su timeout no libera el hilo, lo que en cada check importa más que en la API. Comparar con un resolvedor async (por ejemplo, `aiodns`).
-- Terminada cuando: tests cubren web OK, web con error y web lenta.
+- Decidido (ADR-031 a ADR-038):
+  - SSRF al abrir cada conexión, con la IP fijada, y `trust_env=False`;
+  - seguir hasta 5 redirecciones (más, un bucle o un esquema raro → `http_error`);
+  - un plazo total de 10 s, y `response_time_ms` hasta las cabeceras finales;
+  - GET sin descargar el cuerpo;
+  - User-Agent `PulseOps/<versión> (uptime monitor)`;
+  - conexiones nuevas en cada check;
+  - DNS con `getaddrinfo` en un pool de hilos propio;
+  - `Checker` / `CheckOutcome` en `pulseops/checker/`, con el comando `python -m pulseops.checker <url>`;
+  - cobertura con `pytest-cov` y smoke test en `scripts/smoke_test.py`.
+- Terminada cuando:
+  - hay tests de OK, 404/500, timeout, redirecciones, conexión rechazada, certificados inválidos, DNS y rebinding;
+  - el comando funciona dentro del contenedor;
+  - Toni lo prueba.
 
 **Fase 4 — Checks automáticos (ArdiQ)**
 Lanzar los checks según el intervalo de cada monitor y guardar resultados.
@@ -223,6 +254,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - Terminada cuando: check verde en GitHub y release **v0.1.0**. → **MVP completo.**
 
 ### Post-MVP
+- **Pendiente sin fase asignada:** **códigos de respuesta esperados configurables por monitor.** Hoy, un 401/403 de una API protegida, o de una web que bloquea robots, sale como caída.
 - **Fase 7 — Alertas e incidentes:** Telegram, agrupar caídas en incidentes, anti-spam (p. ej. avisar tras N fallos seguidos).
 - **Fase 8 — Interfaz y métricas:** Grafana y/o HTMX; métricas Prometheus.
 - **Fase 9 — Despliegue:** VPS, Nginx o Caddy, dominio, HTTPS, despliegue automático.
@@ -240,18 +272,34 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 ## Convenciones
 
 - **Ramas:** una por fase, en inglés (`phase-0-foundations`, `phase-1-data-model`…), fusionadas a `main` por PR.
-- **Commits:** Conventional Commits en inglés (`feat:`, `fix:`, `chore:`, `docs:`, `test:`), pequeños y descriptivos.
+- **Commits:** Conventional Commits en inglés (`feat:`, `fix:`, `chore:`, `docs:`, `test:`), pequeños y descriptivos, sin líneas de atribución y siempre con el OK previo de Toni (regla 15).
 - **Idioma del proyecto: inglés.** Todo lo que vive en el repo va en inglés: código (nombres, comentarios, docstrings), README, `docs/decisions.md` y cualquier otra documentación, mensajes de commit, ramas, issues y Pull Requests.
 - **Idioma de la conversación: español.** Las explicaciones, preguntas y resúmenes para Toni se dan en español.
 - **Calidad:** todo el código pasa Ruff y pytest antes de cada PR. Tests para cada pieza con lógica.
 - **Configuración:** variables de entorno (`.env`, con `.env.example` en el repo). Nunca subir secretos.
 - **Decisiones:** cada una en `docs/decisions.md`.
+- **Datos verificados** (tests, comprobaciones manuales, versiones, hallazgos): en `docs/evidence.md`.
 
 ---
 
 ## Estado actual
 
-- **Fase actual:** Fase 2 — API de monitores, **construida y verificada** en la rama `phase-2-monitors-api`. Falta que Toni la pruebe y abrir el PR.
+- **Fase actual:** Fase 3 — El comprobador, **construida y verificada** en la rama `phase-3-checker` (sin subir). Falta que Toni la pruebe, aprobar los commits pendientes y el PR. Fase 2 cerrada (PR #3).
+- **Hecho en Fase 3:**
+  - `pulseops/checker/` (`Checker`, `CheckOutcome`, backend de red con IP fijada, comando `python -m pulseops.checker`);
+  - DNS en un pool de hilos propio;
+  - 26 tests del comprobador contra servidores HTTP y HTTPS locales reales (con `trustme`);
+  - cobertura con `pytest-cov` (95 %);
+  - `scripts/smoke_test.py` (22/22 contra el stack);
+  - ADR-031 a ADR-038.
+- **Cambios descubiertos en Fase 3:**
+  - Desde la red de desarrollo, `example.com` (sus IPs de Cloudflare) no responde: la conexión se corta, también con `curl`. Otras webs, incluso detrás de Cloudflare, funcionan. Para verificar, se usa `https://www.google.com`.
+    - **Pendiente:** repetir `example.com` el 2026-10-28 para confirmar que era cosa de la red. Hipótesis de Toni: en España, algunas operadoras bloquean IPs de Cloudflare durante los partidos de LaLiga.
+  - httpbin.org y httpbingo.org ya no redirigen a destinos arbitrarios (403 con una lista blanca), así que no sirven para probar "redirección a una IP interna". Para eso están los tests automáticos y los nombres DNS públicos tipo `169.254.169.254.nip.io`.
+  - La cobertura necesita `concurrency = ["greenlet", "thread"]`: SQLAlchemy async ejecuta código en greenlets, y sin esto marca como no ejecutadas líneas que sí lo están.
+  - httpcore2 hace el handshake TLS con el nombre del origen (`server_hostname`), no con la IP conectada; por eso fijar la IP no rompe HTTPS.
+  - El servidor de pruebas debe usar `Server.close_clients()` (Python 3.13) al apagarse; sin ello, los tests tardaban 35 s en lugar de 0,6 s.
+  - Identidad de git: `3fxsty` con el email noreply de GitHub. Los commits ya subidos conservan la identidad antigua.
 - **Hecho en Fase 2:**
   - CRUD en `/api/v1/monitors` con API key;
   - errores RFC 9457 + `code`;
@@ -291,4 +339,4 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:** Toni prueba la Fase 2 → PR hacia `main`. Después, la Fase 3 (el comprobador) en modo plan (regla 8).
+- **Siguiente paso:** Toni prueba la Fase 3 y aprueba los commits (regla 15); después, push y PR con su OK. Luego, la Fase 4 en modo plan.

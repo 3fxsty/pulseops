@@ -668,3 +668,182 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 **Weak point.** Python has no truly private constructors: importing the private token would bypass the guard. It prevents mistakes, not deliberate misuse, and such a bypass stands out in code review.
 
 **Reversibility.** Easy.
+
+---
+
+## ADR-031 — SSRF at connect time: IP pinning, no proxies
+
+- **Date:** 2026-10-27 (Phase 3)
+- **Status:** Accepted
+
+**Context.** Validating a URL's DNS and then letting the HTTP client resolve it again leaves a gap (time-of-check/time-of-use). Between the two lookups a hostname can switch from a public IP to an internal one (DNS rebinding). Redirects can also point anywhere.
+
+**Options.**
+1. **Pin the IP in a custom network backend:** resolve, validate, connect to the validated address.
+2. **Validate first, then let httpx2 resolve again** — simple, but leaves the rebinding gap.
+3. **Dedicated egress proxy** (e.g. Smokescreen) — strongest, but an extra service.
+
+**Decision.** Option 1 (`pulseops/checker/network.py`).
+- `PinnedNetworkBackend.connect_tcp` resolves the host, validates **all** addresses with `is_allowed_address` (one disallowed address blocks the host, same rule as the API), and connects to one of those same addresses. It tries them in order and falls back on failure.
+- TLS keeps using the hostname for SNI and certificate validation. Verified in httpcore2: `server_hostname` comes from the request origin, not the connected IP.
+- Every connection goes through the backend, so redirects are covered with no extra code.
+- The client is created with **`trust_env=False`**. Through an `HTTP(S)_PROXY` from the environment, the SSRF check would apply to the proxy's address instead of the target's. A test proves the variables are ignored.
+
+**Weak point.** `PinnedTransport` replaces httpx2's internal `_pool` attribute; a release could change it. The checker tests, including a simulated rebinding, fail loudly if that happens. It was verified that disabling the validation makes the four SSRF tests fail.
+
+**Reversibility.** Easy: isolated module. Option 3 is reevaluated in Phase 9.
+
+---
+
+## ADR-032 — Redirects: follow up to 5
+
+- **Date:** 2026-10-27 (Phase 3)
+- **Status:** Accepted
+
+**Options.**
+1. **Follow up to 5.**
+2. **Do not follow; any 3xx counts as up.**
+
+**Decision.** Follow up to 5 (`follow_redirects=True`, `max_redirects=5`). The final page is what gets measured, as a visitor would see it.
+
+| Case | Result |
+|---|---|
+| More than 5 redirects, or a loop | Down, `http_error` |
+| Redirect to a scheme other than http/https | Down, `http_error` |
+| Redirect to a disallowed address | Down, `blocked_target` (enforced at connect time, ADR-031) |
+
+**Rationale.** Option 2 would report `http://site` → 301 as up even if the HTTPS site were down.
+
+**Weak point.** Intermediate redirect bodies are read by httpx2 (usually empty), within the global deadline.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-033 — Timing: one 10-second deadline for the whole check
+
+- **Date:** 2026-10-27 (Phase 3)
+- **Status:** Accepted
+
+**Options.**
+1. **One total deadline.**
+2. **Per-phase timeouts** (connect, read…).
+
+**Decision.**
+- **One deadline (`asyncio.timeout(10)`)** covers DNS, connection, TLS, every redirect and the final response headers. It matches the business rule "takes more than 10 s → down" exactly.
+- **`response_time_ms`** runs from the start of the check until the final response's headers arrive, redirects included.
+- **On timeout:** `timeout`, with no status code and no response time.
+- **The body is never downloaded:** the response is opened as a stream and closed after the headers.
+
+**Rationale.** Per-phase timeouts can add up to more than 10 s and break the business rule.
+
+**Weak point.** A timeout does not say which phase was slow.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-034 — User-Agent: honest, versioned
+
+- **Date:** 2026-10-27 (Phase 3)
+- **Status:** Accepted
+
+**Options.**
+1. **An own User-Agent.**
+2. **Imitate a browser.**
+3. **httpx2's default.**
+
+**Decision.** `PulseOps/<package version> (uptime monitor)`. The version is read automatically from the package metadata. A contact URL will be added once there is a domain (Phase 9).
+
+**Rationale.** It identifies the bot honestly, as serious monitors do. Imitating a browser deceives the site, and the default does not identify PulseOps.
+
+**Weak point.** Sites that block bots answer 403 and show as down. Configurable expected status codes per monitor are on the post-MVP roadmap.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-035 — Fresh connections for every check
+
+- **Date:** 2026-10-27 (Phase 3)
+- **Status:** Accepted
+
+**Options.**
+1. **Shared client, no keep-alive.**
+2. **Reuse connections.**
+
+**Decision.** One shared client per `Checker` (TLS setup reused) with `max_keepalive_connections=0`. Every check pays DNS + TCP + TLS like a first-time visitor.
+
+**Rationale.** Response times stay comparable between checks, and every check goes through the SSRF validation again (an open connection would skip it).
+
+**Weak point.** Costs more network and CPU per check.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-036 — DNS resolution: getaddrinfo in a dedicated, bounded thread pool
+
+- **Date:** 2026-10-27 (Phase 3)
+- **Status:** Accepted
+
+**Context.** `getaddrinfo` blocks, so it runs in a thread. A timeout frees the caller but not the thread.
+
+**Options.**
+1. **`getaddrinfo` in a dedicated pool.**
+2. **`aiodns`** (c-ares): truly async, but adds a C library and behaves differently from the system resolver in edge cases (`/etc/hosts`, search domains).
+
+**Decision.** `getaddrinfo` in a dedicated `ThreadPoolExecutor` (16 threads, `pulseops-dns`), shared by the API and the checker. Timeout: 2.5 s; a failed lookup returns "no answer" (`dns_error`).
+
+**Rationale.** No new dependency, and the same behaviour as the rest of the system (including Docker's internal DNS). A stuck DNS server can only exhaust its own pool, never the rest of the process.
+
+**Weak point.** If DNS goes down completely, the pool saturates and checks report down, which in that situation is the truth.
+
+**Reversibility.** Easy: one function. Revisit `aiodns` if saturation shows up in Phase 4.
+
+---
+
+## ADR-037 — Checker interface, error mapping and command line
+
+- **Date:** 2026-10-27 (Phase 3)
+- **Status:** Accepted
+
+**Decision.**
+- **Package:** `pulseops/checker/`, with no database access (Phase 4 stores results).
+- **`Checker`:** a reusable class (one HTTP client for many checks). `check_url()` is a one-off helper.
+- **`CheckOutcome`:** an immutable dataclass mirroring a `checks` row. It enforces the same rules as the database constraints (`is_up` ⇔ no `error_kind`, known kinds, detail ≤ 500 characters).
+- **Error mapping**, each case verified against real local servers:
+
+| Situation | `error_kind` |
+|---|---|
+| Deadline exceeded | `timeout` |
+| Name does not resolve | `dns_error` |
+| Connection refused or reset | `connection_error` |
+| Invalid, expired, wrong-name or untrusted certificate | `ssl_error` (detected through the `ssl.SSLError` cause of httpx2's `ConnectError`) |
+| 4xx/5xx, too many redirects, unsupported redirect scheme | `http_error` |
+| Disallowed address, also after a redirect | `blocked_target`, with a generic detail that never contains an IP |
+
+- **Command line:** `python -m pulseops.checker <url>` normalizes the URL like the API, applies `ALLOW_PRIVATE_TARGETS` and prints the outcome as JSON (exit 0 up, 1 down, 2 invalid URL).
+
+**Rejected.** A temporary API endpoint to trigger checks: it would let the API fetch arbitrary URLs on demand, which is another SSRF surface.
+
+**Reversibility.** Medium: Phase 4 will depend on this interface.
+
+---
+
+## ADR-038 — Evidence tooling: coverage and smoke test
+
+- **Date:** 2026-10-27 (Phase 3)
+- **Status:** Accepted
+
+**Decision.**
+- **Coverage:** `pytest-cov`, run with `uv run pytest --cov`, branch coverage on. It is configured with `concurrency = ["greenlet", "thread"]`: SQLAlchemy async runs code in greenlets, and without it lines after a database call were wrongly reported as never executed. The figure is recorded in `docs/evidence.md`.
+- **Smoke test:** `scripts/smoke_test.py` runs the manual test list against the live stack from outside, as a user would.
+  - It only touches the monitors it creates (unique URLs per run) and deletes them, so it is safe on a stack with real data.
+  - It is extended in every phase.
+
+**Weak point.**
+- A high coverage figure does not prove the tests check the right things. The SSRF tests were checked by disabling the protection and watching them fail.
+- The smoke test needs internet access, because it creates monitors for real sites.
+
+**Reversibility.** Easy.

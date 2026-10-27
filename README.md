@@ -79,6 +79,22 @@ Requirements: [uv](https://docs.astral.sh/uv/), and PostgreSQL running (`docker 
 ```bash
 uv sync                # install dependencies (Python 3.13 is fetched automatically)
 uv run pytest          # run the tests (against the separate pulseops_test database)
+uv run pytest --cov    # same, with a coverage report
 uv run ruff check .    # lint, including security rules
 uv run ruff format .   # format
 ```
+
+With the stack running (`docker compose up -d`):
+
+```bash
+# Check one URL exactly as PulseOps will (prints JSON; exit 0 = up, 1 = down)
+docker compose exec api python -m pulseops.checker https://www.google.com
+
+# Smoke test: the manual test list against the live API (needs internet access).
+# It only touches the monitors it creates, and deletes them afterwards.
+uv run python scripts/smoke_test.py
+```
+
+## Checker
+
+A site is **down** if it does not answer, returns 4xx/5xx, or takes more than 10 s (one deadline for DNS, connection, TLS, up to 5 redirects and the final headers). The body is never downloaded. Every TCP connection, including each redirect, is SSRF-checked at connect time and pinned to the validated IP. Failures are classified as `timeout`, `dns_error`, `connection_error`, `ssl_error`, `http_error` or `blocked_target`.
