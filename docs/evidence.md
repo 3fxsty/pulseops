@@ -13,30 +13,36 @@ Updated at the close of every phase (and whenever a verified fact changes). It c
 | 0 — Foundations | PR #1, 2026-10-26 | 1 passed | clean | 8 | `/health` 200, Swagger 200, `ardiq doctor` OK on Valkey |
 | 1 — Data model | PR #2, 2026-10-26 | 29 passed | clean (with `S` rules) | 16 | Clean-volume start, `\d checks`, downgrade/upgrade, `alembic check` |
 | 2 — Monitors API | PR #3, 2026-10-27 | 143 passed | clean (with `S` rules) | 30 | Manual test list: 22/22 against the live stack |
+| 3 — Checker | pending | 170 passed, 95 % coverage | clean (with `S` rules) | 38 | Checker inside the container against real sites; smoke test 22/22 |
 
 Reproduce the current numbers:
 
 ```bash
 uv run pytest -q                 # test count and result
+uv run pytest -q --cov           # same, with coverage
+uv run python scripts/smoke_test.py   # live stack, from outside
 uv run ruff check .              # lint, including security rules
 uv run alembic check             # models match migrations
 grep -c "^## ADR-" docs/decisions.md
 ```
 
-## Current test suite (2026-10-27, after Phase 2)
+## Current test suite (2026-10-27, Phase 3)
 
-**143 passed in ~2.5 s**, against real PostgreSQL 18 (separate `pulseops_test` database).
+**170 passed in ~4.5 s**, against real PostgreSQL 18 (separate `pulseops_test` database) and real local HTTP/HTTPS servers. **Coverage: 95 %** (statements and branches, `uv run pytest --cov`).
 
 | File | Tests | What it proves |
 |---|---|---|
-| `test_ssrf.py` | 44 | The full SSRF address table, DNS behaviour, disguised internal URLs, `ValidatedUrl` guard |
+| `test_ssrf.py` | 45 | The full SSRF address table, DNS behaviour (own thread pool, failures, timeouts), disguised internal URLs, `ValidatedUrl` guard |
 | `test_api_monitors.py` | 31 | Every endpoint, pagination, PATCH rules, 404/409/422 paths, cascade delete, repository guard |
+| `test_checker.py` | 26 | Up/down against real local servers: 200, 404/500/503, timeout, body never downloaded, User-Agent, refused connection, DNS failure, address fallback, redirects (limit, loop, other scheme), SSRF at connect time (literal IP, redirect to internal IP, DNS rebinding, mixed answers), proxy variables ignored, TLS (valid, wrong name, expired, untrusted CA), CLI |
 | `test_url_normalization.py` | 25 | Every normalization rule, credential rejection, length limits |
 | `test_models.py` | 22 | Every database constraint, UUID v7, cascade, `ON CONFLICT DO NOTHING` idempotency |
 | `test_api_security.py` | 14 | "Must never happen" guarantees (see below) |
 | `test_permissions.py` | 4 | The app role can read and write rows, but cannot CREATE, ALTER or DROP |
 | `test_migrations.py` | 2 | Downgrade/upgrade round trip; models match migrations |
 | `test_health.py` | 1 | Liveness endpoint |
+
+Not covered, on purpose: the real database session factory (tests substitute their own), the ArdiQ queue (unused until Phase 4), and small helpers.
 
 ## Guarantees backed by automated tests
 
@@ -55,6 +61,11 @@ grep -c "^## ADR-" docs/decisions.md
 | An unvalidated URL cannot be stored | `test_repository_refuses_unvalidated_urls`, `test_validated_url_cannot_be_built_directly` |
 | The app database role cannot change the schema | `test_permissions.py::test_app_role_cannot_change_schema` |
 | A re-delivered check is a no-op | `test_models.py::test_check_redelivery_is_a_no_op_with_on_conflict` |
+| The checker never connects to a disallowed address, not even after a redirect or a DNS answer that changes (rebinding) | `test_checker.py::test_dns_rebinding_is_blocked`, `test_redirect_to_internal_ip_is_blocked`, `test_one_internal_address_blocks_the_whole_host` |
+| Those SSRF tests really detect the gap | Checked on 2026-10-27: with the validation disabled, all four fail |
+| The checker ignores `HTTP(S)_PROXY` | `test_proxy_environment_variables_are_ignored` (a default client fails on the same variables) |
+| The response body is never downloaded | `test_body_is_never_downloaded` |
+| Bad certificates are never accepted | `test_bad_certificate_is_ssl_error`, `test_untrusted_certificate_authority_is_ssl_error` |
 | Tests never touch development data | Separate `pulseops_test` database. Checked manually on 2026-10-26: dev `monitors` count stayed 0 after a full test run |
 
 ## Manual verifications
@@ -70,6 +81,9 @@ grep -c "^## ADR-" docs/decisions.md
 | 2026-10-27 | Manual test list for Phase 2, 22 cases, live stack | **22/22 as expected**: auth, normalization, 409 on disguised duplicate, 422 on metadata/localhost/`postgres`/`0x7f.1`/`[::ffff:127.0.0.1]`/credentials/forbidden field, pagination, PATCH including SSRF backdoor, 404/204 |
 | 2026-10-27 | `http://postgres:5432/` (Docker service name) | Blocked by SSRF: it resolves to a private IP inside the Docker network |
 | 2026-10-27 | Reachability of `127.0.0.1:8000` | Reachable from the host's browser (`/docs` → 200); **not** reachable on the machine's network address (`<local IP>:8000` → no answer) |
+| 2026-10-27 | `python -m pulseops.checker` inside the API container | `https://www.google.com` up (200), so the image's system CA certificates work with httpx2/truststore; `https://httpbin.org/status/404` → `http_error` 404; `https://expired.badssl.com` → `ssl_error`; `http://169.254.169.254/` and `http://postgres:5432/` → `blocked_target` |
+| 2026-10-27 | `scripts/smoke_test.py` against the live stack | **22/22**; none of its monitors left behind |
+| 2026-10-27 | `https://example.com` from the development network | Down: the connection to its Cloudflare addresses is reset (also with plain `curl`); other sites, Cloudflare-hosted ones included, are up. A network-path issue, not a checker bug |
 | 2026-10-26/27 | Phases 0, 1 and 2 tested by the project owner | Swagger `/health` 200 (Phase 0); `psql` checks (Phase 1); manual list (Phase 2) |
 
 ## Library behaviour verified (instead of assumed)
@@ -87,6 +101,12 @@ grep -c "^## ADR-" docs/decisions.md
 | Valkey 9.1.2 reports `redis_version:7.2.4` | Compatible with ArdiQ (ADR-007) |
 | During first init, PostgreSQL listens only on the Unix socket | Healthcheck uses TCP so `migrate` waits for the roles |
 | FastAPI 0.162 keeps included routers nested (`_IncludedRouter`) | `app.routes` does not list router endpoints; `url_path_for` still works |
+| httpcore2 does the TLS handshake with the origin hostname (`server_hostname`), not the connected IP | Pinning the IP keeps HTTPS working (SNI and certificate checks use the name) |
+| httpx2 reports TLS failures as `ConnectError`; the `ssl.SSLError` is in the cause chain | The checker walks the chain to tell `ssl_error` from `connection_error` |
+| httpx2's default client obeys `HTTP(S)_PROXY` | The checker sets `trust_env=False` |
+| Coverage under SQLAlchemy async misses lines after database calls unless `concurrency = ["greenlet", "thread"]` | Set in `pyproject.toml`; `api/monitors.py` went from a false 80 % to 100 % |
+| `asyncio.Server.wait_closed()` waits for open connections | Test servers call `close_clients()` (Python 3.13); suite time 35 s → 0.6 s |
+| trustme 1.2.1 issues expired certificates (`not_after`) | Expired-certificate test runs offline |
 
 ## Verified versions (2026-10-27)
 
@@ -104,12 +124,12 @@ grep -c "^## ADR-" docs/decisions.md
 | Valkey | 9.1.2 |
 | Docker / Compose | 29.9.2 / v5.6.1 |
 
-## Size (2026-10-27, after Phase 2)
+## Size (2026-10-27)
 
 | Metric | Value | Command |
 |---|---|---|
 | Commits on `main` | 32 | `git rev-list --count main` |
-| Non-blank lines in `src/` | 780 | `find src -name '*.py' \| xargs cat \| grep -cv '^\s*$'` |
-| Non-blank lines in `tests/` | 734 | same, on `tests` |
-| ADRs | 30 | `grep -c "^## ADR-" docs/decisions.md` |
+| Non-blank lines in `src/` | 1055 (after Phase 3; 780 after Phase 2) | `find src -name '*.py' \| xargs cat \| grep -cv '^\s*$'` |
+| Non-blank lines in `tests/` | 1052 (after Phase 3; 734 after Phase 2) | same, on `tests` |
+| ADRs | 38 | `grep -c "^## ADR-" docs/decisions.md` |
 | Merged PRs | 3 | `gh pr list --state merged` |
