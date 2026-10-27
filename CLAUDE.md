@@ -294,6 +294,8 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - ADR-031 a ADR-038.
 - **Cambios descubiertos en Fase 3:**
   - Desde la red de desarrollo, `example.com` (sus IPs de Cloudflare) no responde: la conexión se corta, también con `curl`. Otras webs, incluso detrás de Cloudflare, funcionan. Para verificar, se usa `https://www.google.com`.
+    - **Pendiente:** repetir `example.com` el 2026-10-28 para confirmar que era cosa de la red. Hipótesis de Toni: en España, algunas operadoras bloquean IPs de Cloudflare durante los partidos de LaLiga.
+  - httpbin.org y httpbingo.org ya no redirigen a destinos arbitrarios (403 con una lista blanca), así que no sirven para probar "redirección a una IP interna". Para eso están los tests automáticos y los nombres DNS públicos tipo `169.254.169.254.nip.io`.
   - La cobertura necesita `concurrency = ["greenlet", "thread"]`: SQLAlchemy async ejecuta código en greenlets, y sin esto marca como no ejecutadas líneas que sí lo están.
   - httpcore2 hace el handshake TLS con el nombre del origen (`server_hostname`), no con la IP conectada; por eso fijar la IP no rompe HTTPS.
   - El servidor de pruebas debe usar `Server.close_clients()` (Python 3.13) al apagarse; sin ello, los tests tardaban 35 s en lugar de 0,6 s.
