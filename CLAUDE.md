@@ -41,6 +41,15 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
     - Solo datos oficiales que salgan de un comando, un test o una prueba realmente hecha, con fecha y forma de reproducirlos. Nunca estimaciones ni datos de memoria.
     - Al cerrar cada fase: añadir su fila a la tabla por fases (tests, Ruff, ADRs, verificación manual) y actualizar el desglose de tests, las garantías, las versiones y el tamaño.
     - Cada hallazgo sobre una librería o comportamiento verificado va también a su tabla.
+15. **Nada sale de git sin el OK de Toni.**
+    - **Antes de cada commit**, enséñale:
+      - qué archivos cambian;
+      - un resumen de los cambios;
+      - el mensaje de commit propuesto.
+
+      Después, espera su OK.
+    - **Lo mismo antes de cada push y de abrir cada PR:** enséñale qué se sube, o el título y la descripción del PR, y espera su OK.
+    - **Sin líneas de atribución:** ni los commits ni los PR llevan "Co-Authored-By: Claude", "Generated with Claude Code" ni ninguna otra. Está desactivado también en `~/.claude/settings.json` (`attribution`).
 
 ### El ciclo de cada fase
 0. **Planificar** (modo plan): Claude explica qué hay que investigar y decidir en la fase.
@@ -244,7 +253,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 ## Convenciones
 
 - **Ramas:** una por fase, en inglés (`phase-0-foundations`, `phase-1-data-model`…), fusionadas a `main` por PR.
-- **Commits:** Conventional Commits en inglés (`feat:`, `fix:`, `chore:`, `docs:`, `test:`), pequeños y descriptivos.
+- **Commits:** Conventional Commits en inglés (`feat:`, `fix:`, `chore:`, `docs:`, `test:`), pequeños y descriptivos, sin líneas de atribución y siempre con el OK previo de Toni (regla 15).
 - **Idioma del proyecto: inglés.** Todo lo que vive en el repo va en inglés: código (nombres, comentarios, docstrings), README, `docs/decisions.md` y cualquier otra documentación, mensajes de commit, ramas, issues y Pull Requests.
 - **Idioma de la conversación: español.** Las explicaciones, preguntas y resúmenes para Toni se dan en español.
 - **Calidad:** todo el código pasa Ruff y pytest antes de cada PR. Tests para cada pieza con lógica.
