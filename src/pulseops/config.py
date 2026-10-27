@@ -23,7 +23,6 @@ class Settings(BaseSettings):
 
     # Connects as the least-privileged role (pulseops_app): rows only, no DDL.
     database_url: SecretStr
-    broker_url: SecretStr
     # SSRF protection: private, loopback and reserved targets are blocked
     # unless explicitly allowed (e.g. a self-hosted install on a private net).
     allow_private_targets: bool = False
@@ -39,6 +38,20 @@ class ApiSettings(BaseSettings):
     api_key: SecretStr = Field(min_length=API_KEY_MIN_LENGTH)
     # Serves /docs, /redoc and /openapi.json.
     docs_enabled: bool = True
+
+
+class BrokerSettings(BaseSettings):
+    """Settings only the worker needs, kept apart so the API never sees them.
+
+    The API does not use the queue (the scheduler reads monitors from the
+    database), so it never gets the Valkey password.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env", extra="ignore", hide_input_in_errors=True
+    )
+
+    broker_url: SecretStr
 
 
 class MigrationSettings(BaseSettings):

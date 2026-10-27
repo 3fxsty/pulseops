@@ -847,3 +847,174 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 - The smoke test needs internet access, because it creates monitors for real sites.
 
 **Reversibility.** Easy.
+
+---
+
+## ADR-039 — Scheduling: one global scheduler, the schedule in PostgreSQL
+
+- **Date:** 2026-10-27 (Phase 4)
+- **Status:** Accepted
+
+**Context.** Each monitor must be checked every `interval_seconds`. This is the key design choice of the MVP: who decides which monitors are due, and where that schedule lives.
+
+**Options.**
+1. **A global scheduler** (an ArdiQ cron every few seconds) that reads a `next_check_at` column in PostgreSQL.
+2. **One self-rescheduling task per monitor**: each check enqueues the next one with `schedule_ms`.
+3. **One `@app.cron` per monitor.**
+
+**Decision.** Option 1.
+- **New column:** `monitors.next_check_at` (`timestamptz NOT NULL DEFAULT now()`, migration `0002`), with a partial index on `next_check_at WHERE is_active`.
+- **The scheduler:** `@app.cron(every=5, coalesce=True)`. Each tick runs one statement that claims the due monitors (`next_check_at <= now()`, oldest first, at most 500) and moves them to their next slot:
+  - `UPDATE … FROM (SELECT … FOR NO KEY UPDATE SKIP LOCKED) RETURNING` claims each monitor once, even with two schedulers running: the second skips the rows the first has locked.
+  - `NO KEY UPDATE` rather than `UPDATE`, because ids never change. With plain `FOR UPDATE`, storing a check for a claimed monitor (a foreign key share lock) waited for the scheduler's commit. Verified by `test_a_claimed_monitor_still_accepts_checks`, which times out with the stronger lock.
+  - Times come from the database clock.
+  - Scheduling keeps `updated_at` as it is: it is not an edit.
+- **Enqueue before commit.** The tick enqueues the claimed checks (one `enqueue_many` round trip) and only then commits:
+  - if enqueueing fails, the claim rolls back and the next tick claims the same slots again, so no check is lost;
+  - if the commit fails after enqueueing, the same checks are enqueued again, and the fixed task ids and `ON CONFLICT DO NOTHING` absorb them (ADR-041).
+- **Why:**
+  - **The schedule lives in the source of truth.** Losing Valkey, or a single task, costs at most one check per monitor. Nothing stops silently.
+  - **Changes need no queue access.** Creating, editing, pausing or deleting a monitor takes effect on its own, without the API touching the queue (ADR-043).
+
+**Rejected.**
+- **Option 2:** exact timing and no polling, but one lost task (Valkey restart, dead letter, bug) silently stops that monitor for good. It would need a "repair" cron, which is option 1 plus complexity. Edits and deletes would also make the API cancel tasks in Valkey, and a re-delivered check would enqueue two "next" checks.
+- **Option 3:** ArdiQ registers crons at import time (a decorator filling a dict); they cannot be created or removed at runtime. Checked in the ArdiQ 1.2.0 source.
+
+**Weak point.**
+- One query every 5 s even when nothing is due (cheap with the partial index).
+- A check can start up to one tick (≤ 5 s) late.
+- `next_check_at` is updated on every check, leaving dead row versions for autovacuum. Irrelevant at this scale.
+
+**Reversibility.** Medium: a column, an index and one module (`repositories/scheduling.py`).
+
+---
+
+## ADR-040 — Next slot, missed periods and rescheduling on edit
+
+- **Date:** 2026-10-27 (Phase 4)
+- **Status:** Accepted
+
+**Decision.**
+- **Next slot:** `previous slot + k × interval`, with the smallest `k` that lands in the future. After an outage, a monitor gets one check for the slot that was due and none for the missed ones, and it stays on its own time grid. Monitors therefore stay spread out instead of all firing in the same second.
+- **Gaps:** periods when the worker was down have no checks. Phase 5 counts them as **"no data"**, neither up nor down.
+- **Brought forward to `now()`:**
+  - **on create** (the column default), so the first check comes within a few seconds;
+  - **when the URL or the interval changes, or the monitor is reactivated.** Otherwise going from a 1-day interval to 30 s would still wait for the old slot. Only real changes count: sending the same value, renaming or pausing keep the schedule.
+
+**Rejected.**
+- **Catching up** (one check per missed period): a stampede of late checks that say nothing about the past.
+- **Resetting to `now() + interval`:** simple, but every overdue monitor lands on the same instant.
+
+**Reversibility.** Easy: one SQL expression and one helper in `repositories/monitors.py`.
+
+---
+
+## ADR-041 — The check task: idempotent, ids only, no connection held
+
+- **Date:** 2026-10-27 (Phase 4)
+- **Status:** Accepted
+
+**Decision.**
+- **Payload:** `check_monitor(monitor_id, scheduled_at_us)`. Only two integers travel through the queue, never the URL, so it never shows up in Valkey, in ArdiQ's logs or in its dead letter queue. `scheduled_at` travels in **microseconds**:
+  - msgpack cannot carry datetimes;
+  - milliseconds would lose part of the database value, so the check would not land exactly on the claimed slot.
+- **Idempotency, two safeguards:**
+  - **A fixed task id `check:<monitor_id>:<µs>`:** the same slot enqueued twice while it waits is one task.
+  - **`INSERT … ON CONFLICT DO NOTHING` on `(monitor_id, scheduled_at)`.** Needed because ArdiQ's id deduplication only lasts while the task exists: the same id enqueued after the task finished runs again (verified against Valkey, `test_same_task_id_after_it_finished_runs_again`). The first outcome wins.
+- **No database connection during the check:** a short session reads the monitor and closes, then the check runs (up to 10 s), then a new session stores the result. Verified by `test_no_database_connection_is_held_during_the_check`: no pooled connection is checked out while the fake checker runs.
+- **Deleted or paused monitor:** nothing is checked. A monitor deleted while its check runs is not an error: the foreign key violation is recognised by constraint name and nothing is stored.
+- **Task options:**
+  - `max_retries=3`, for infrastructure failures only (database down). A site that is down is an outcome, not an error. Retrying is safe because the insert is idempotent.
+  - `timeout=30` s, a safety net above the checker's 10 s deadline.
+  - `expire_ms` = the monitor's interval: a check not started before the next slot is dropped (verified against Valkey, `test_expired_tasks_are_dropped_without_running`).
+- **Layering:** the logic lives in `pulseops/scheduling.py` and knows nothing about ArdiQ. `pulseops/queue/tasks.py` only wraps it, so the queue can be swapped and the logic is tested without Valkey.
+
+**Reversibility.** Easy for the options; the payload format must stay compatible while tasks are in flight.
+
+---
+
+## ADR-042 — Worker capacity and the database pool
+
+- **Date:** 2026-10-27 (Phase 4)
+- **Status:** Accepted
+
+**Decision.**
+- **`concurrency=32`:** checks wait on the network, not the CPU.
+  - **Rough numbers, not measured:** about 100 checks/s at 300 ms each, about 3 checks/s if every check hits the 10 s deadline.
+  - **To scale:** `ardiq run -w N` or more worker containers, without code changes.
+- **Two lanes, `checks` and `scheduler`, with `limits={"checks": 31}`:** checks never take the last slot, so slow checks cannot keep the scheduler waiting. `default_priority` is set explicitly to `checks`, because with two lanes ArdiQ's default would be the higher one.
+- **Database pool:** SQLAlchemy's default, 5 + 10 overflow = 15 connections per process. Each task holds one only for milliseconds (ADR-041), so 15 serve 32 concurrent tasks. When the pool is exhausted, a task waits (up to 30 s) instead of failing. API (15) + worker (15) stay well below PostgreSQL's default of 100.
+- **Startup and shutdown:** `@app.lifespan` creates one `Checker` (shared TLS setup) and the session factory per worker, and disposes of the engine on shutdown. `stop_grace_period: 15s` in Compose lets checks in flight finish.
+
+**Weak point.** Starting values, not measurements. To be tuned with `app.metrics()` once there is real load.
+
+**Reversibility.** Easy: constants in `pulseops/queue/app.py`.
+
+---
+
+## ADR-043 — Broker settings apart; Valkey for tests on localhost
+
+- **Date:** 2026-10-27 (Phase 4)
+- **Status:** Accepted
+
+**Decision.**
+- **`BrokerSettings`** holds `broker_url` and is used only by the worker. The API service no longer receives `BROKER_URL`. With ADR-039 the API never uses the queue, so it never gets the Valkey password; a compromised API cannot inject tasks. It mirrors `ApiSettings`, which the worker never sees.
+- **Valkey is published on `127.0.0.1:6380`** (password required) so tests can use a real broker, as they do with PostgreSQL.
+  - **Why host port 6380:** 6379 is often taken by another local Redis (it was, on the development machine).
+  - **Inside Docker** the worker still uses `valkey:6379`.
+- **Test isolation:** tests use Valkey logical database `1` (`TEST_BROKER_URL`, development uses `0`), and each test creates its own throwaway queue and purges it.
+- **Why a real broker:** `ardiq.testing.inline` ignores delays and expiry, which are exactly what the scheduler relies on. Inline tests are still used for the task wrappers.
+
+**Weak point.** If the API ever needs to enqueue (for example, a "check now" button), it will need the password again.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-044 — Secrets and URLs stay out of the worker's logs
+
+- **Date:** 2026-10-27 (Phase 4)
+- **Status:** Accepted
+
+**Context.** Monitor URLs may carry tokens in their query. `ardiq run` logs at INFO (DEBUG with `-v`), and ArdiQ logs and keeps the error of every failed task.
+
+**Decision.**
+- **Our log line:** one line per check, with `public_id`, up/down, `error_kind`, response time and whether it was stored. Never the URL, and never `error_detail`, which may echo it. Verified with a URL carrying a token (`test_logs_never_show_the_url_or_the_error_detail`).
+- **httpx2 and httpcore2 log at WARNING only.** httpx2 logs `HTTP Request: GET <full URL>` at INFO for every request and redirect, and httpcore2 traces more at DEBUG. The checker raises both loggers to WARNING, whatever the process's logging setup. `test_urls_never_reach_the_logs` failed before the change.
+- **`hide_parameters=True` on the database engine.** By default, SQLAlchemy puts query parameters in its error messages. A failed insert would then put `error_detail` (and the URL in it) in ArdiQ's logs and dead letters.
+- **The scheduler's errors are logged, not raised.** A failing tick (database or Valkey down) logs `scheduling failed, retrying next tick: <error>` and returns 0. The claim has rolled back, so the next tick, 5 s later, retries the same slots.
+  - **Why:** raising would add a dead letter every 5 s for as long as the outage lasts.
+  - **The password stays out:** ArdiQ's errors do not include the Valkey password (`test_scheduler_error_log_never_shows_the_broker_password`, against the real Valkey with a wrong password).
+
+**Weak point.** While ticks fail, `ardiq status` reports the cron's last run as succeeded. The scheduler heartbeat (ADR-045) is the reliable signal.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-045 — Scheduler heartbeat and restart policy
+
+- **Date:** 2026-10-28 (Phase 4)
+- **Status:** Accepted
+
+**Context.** If the worker dies, or keeps running but stops scheduling, nothing is checked and nothing says so ("who watches the watchman").
+
+**Decision.**
+- **Heartbeat table `scheduler_heartbeat`** (migration `0003`):
+  - **Shape:** one row (`id = 1`, enforced by a CHECK) with `last_success_at`, stamped with the database clock.
+  - **Written in the tick's own transaction,** after the claim and the enqueue, **empty ticks included**. It therefore only moves when a tick really commits: a quiet PulseOps keeps it fresh, and a tick that fails to enqueue leaves the old time in place. Tests: `test_an_empty_tick_still_moves_the_heartbeat`, `test_a_failed_enqueue_does_not_move_the_heartbeat`.
+  - **Who reads it:** the API (Phase 7, `/health`) will read it without access to Valkey.
+- **`restart: unless-stopped`** on `api`, `worker`, `postgres` and `valkey`:
+  - a crashed service comes back on its own, and `docker compose stop` still stops it for good;
+  - `migrate` is `restart: "no"`, because it must run once and exit.
+  - **Verified:** after a `kill -9` of the worker's process, Docker restarted it (restart count 1).
+
+**Rejected.**
+- **A key in Valkey:** lighter, but the API has no access to Valkey (ADR-043).
+- **In memory or in the logs only:** the API could not see it.
+
+**Weak point.**
+- A restart policy only covers a process that exits. A hung but alive worker is caught by the heartbeat, which needs Phase 7's alerting to be acted on.
+- The policy only helps after a reboot if the Docker daemon starts on its own.
+
+**Reversibility.** Easy.

@@ -16,6 +16,10 @@ def get_engine() -> AsyncEngine:
     return create_async_engine(
         get_settings().database_url.get_secret_value(),
         pool_pre_ping=True,
+        # Keep query parameters out of error messages and logs: they can hold
+        # monitor URLs (which may carry tokens), and the queue logs and keeps
+        # the error of every failed task.
+        hide_parameters=True,
     )
 
 

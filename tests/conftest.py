@@ -35,9 +35,20 @@ class DatabaseTestSettings(BaseSettings):
     test_migration_database_url: SecretStr  # pulseops_owner on pulseops_test
 
 
+class BrokerTestSettings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    test_broker_url: SecretStr  # Valkey logical database 1, not the dev one
+
+
 @pytest.fixture(scope="session")
 def db_settings() -> DatabaseTestSettings:
     return DatabaseTestSettings()
+
+
+@pytest.fixture(scope="session")
+def test_broker_url() -> str:
+    return BrokerTestSettings().test_broker_url.get_secret_value()
 
 
 @pytest.fixture(scope="session")
@@ -69,6 +80,7 @@ async def app_engine(migrated_database, db_settings: DatabaseTestSettings):
     async with engine.begin() as connection:
         # Checks go with their monitor (ON DELETE CASCADE).
         await connection.execute(text("DELETE FROM monitors"))
+        await connection.execute(text("DELETE FROM scheduler_heartbeat"))
     await engine.dispose()
 
 

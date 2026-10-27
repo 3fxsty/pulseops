@@ -5,12 +5,39 @@ services:
   api:
     build: .
     image: pulseops
+    # Back up on its own after a crash or a Docker restart; `docker compose
+    # stop` still stops it for good.
+    restart: unless-stopped
     # Localhost only until the reverse proxy arrives in Phase 9 (ADR-029).
     ports:
       - "127.0.0.1:8000:8000"
     environment:
       API_KEY: ${API_KEY:?set it in .env}
       DOCS_ENABLED: ${DOCS_ENABLED:-true}
+      DATABASE_URL: postgresql+asyncpg://pulseops_app:${PULSEOPS_APP_PASSWORD:?set it in .env}@postgres:5432/pulseops
+      ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
+      # No BROKER_URL: the API never uses the queue, so it never gets the
+      # Valkey password.
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Runs the scheduler (every 5 s) and the checks. No API key and no published
+  # port: it only talks to PostgreSQL, Valkey and the monitored sites.
+  worker:
+    build: .
+    image: pulseops
+    # If the worker died and stayed down, nothing would be checked and nothing
+    # would say so. A hung (alive) worker is not covered: that is what the
+    # scheduler heartbeat is for.
+    restart: unless-stopped
+    command: ["ardiq", "run", "--quiet", "pulseops.worker:app"]
+    environment:
       DATABASE_URL: postgresql+asyncpg://pulseops_app:${PULSEOPS_APP_PASSWORD:?set it in .env}@postgres:5432/pulseops
       BROKER_URL: redis://:${VALKEY_PASSWORD:?set it in .env}@valkey:6379/0
       ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
@@ -19,16 +46,15 @@ services:
         condition: service_completed_successfully
       valkey:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
+    # On stop, ArdiQ finishes the checks in flight (10 s deadline each).
+    stop_grace_period: 15s
 
   # One-shot: applies pending migrations as the schema owner, then exits.
   migrate:
     build: .
     image: pulseops
+    # Never restarted: it must run once and exit.
+    restart: "no"
     command: ["alembic", "upgrade", "head"]
     environment:
       MIGRATION_DATABASE_URL: postgresql+asyncpg://pulseops_owner:${PULSEOPS_OWNER_PASSWORD:?set it in .env}@postgres:5432/pulseops
@@ -38,6 +64,7 @@ services:
 
   postgres:
     image: postgres:18
+    restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set it in .env}
       PULSEOPS_OWNER_PASSWORD: ${PULSEOPS_OWNER_PASSWORD:?set it in .env}
@@ -58,9 +85,15 @@ services:
 
   valkey:
     image: valkey/valkey:9
+    restart: unless-stopped
     environment:
       VALKEY_PASSWORD: ${VALKEY_PASSWORD:?set it in .env}
     command: ["sh", "-c", 'exec valkey-server --requirepass "$$VALKEY_PASSWORD"']
+    # Published on localhost only (and password-protected), so tests can run
+    # against a real broker from the host. Host port 6380, so it never clashes
+    # with another local Redis on 6379.
+    ports:
+      - "127.0.0.1:6380:6379"
     volumes:
       - valkey-data:/data
     healthcheck:
