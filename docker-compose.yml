@@ -24,6 +24,24 @@ services:
       timeout: 3s
       retries: 5
 
+  # Runs the scheduler (every 5 s) and the checks. No API key and no published
+  # port: it only talks to PostgreSQL, Valkey and the monitored sites.
+  worker:
+    build: .
+    image: pulseops
+    command: ["ardiq", "run", "--quiet", "pulseops.worker:app"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://pulseops_app:${PULSEOPS_APP_PASSWORD:?set it in .env}@postgres:5432/pulseops
+      BROKER_URL: redis://:${VALKEY_PASSWORD:?set it in .env}@valkey:6379/0
+      ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+    # On stop, ArdiQ finishes the checks in flight (10 s deadline each).
+    stop_grace_period: 15s
+
   # One-shot: applies pending migrations as the schema owner, then exits.
   migrate:
     build: .
@@ -60,6 +78,11 @@ services:
     environment:
       VALKEY_PASSWORD: ${VALKEY_PASSWORD:?set it in .env}
     command: ["sh", "-c", 'exec valkey-server --requirepass "$$VALKEY_PASSWORD"']
+    # Published on localhost only (and password-protected), so tests can run
+    # against a real broker from the host. Host port 6380, so it never clashes
+    # with another local Redis on 6379.
+    ports:
+      - "127.0.0.1:6380:6379"
     volumes:
       - valkey-data:/data
     healthcheck:
