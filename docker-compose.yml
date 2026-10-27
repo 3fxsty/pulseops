@@ -5,6 +5,9 @@ services:
   api:
     build: .
     image: pulseops
+    # Back up on its own after a crash or a Docker restart; `docker compose
+    # stop` still stops it for good.
+    restart: unless-stopped
     # Localhost only until the reverse proxy arrives in Phase 9 (ADR-029).
     ports:
       - "127.0.0.1:8000:8000"
@@ -29,6 +32,10 @@ services:
   worker:
     build: .
     image: pulseops
+    # If the worker died and stayed down, nothing would be checked and nothing
+    # would say so. A hung (alive) worker is not covered: that is what the
+    # scheduler heartbeat is for.
+    restart: unless-stopped
     command: ["ardiq", "run", "--quiet", "pulseops.worker:app"]
     environment:
       DATABASE_URL: postgresql+asyncpg://pulseops_app:${PULSEOPS_APP_PASSWORD:?set it in .env}@postgres:5432/pulseops
@@ -46,6 +53,8 @@ services:
   migrate:
     build: .
     image: pulseops
+    # Never restarted: it must run once and exit.
+    restart: "no"
     command: ["alembic", "upgrade", "head"]
     environment:
       MIGRATION_DATABASE_URL: postgresql+asyncpg://pulseops_owner:${PULSEOPS_OWNER_PASSWORD:?set it in .env}@postgres:5432/pulseops
@@ -55,6 +64,7 @@ services:
 
   postgres:
     image: postgres:18
+    restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set it in .env}
       PULSEOPS_OWNER_PASSWORD: ${PULSEOPS_OWNER_PASSWORD:?set it in .env}
@@ -75,6 +85,7 @@ services:
 
   valkey:
     image: valkey/valkey:9
+    restart: unless-stopped
     environment:
       VALKEY_PASSWORD: ${VALKEY_PASSWORD:?set it in .env}
     command: ["sh", "-c", 'exec valkey-server --requirepass "$$VALKEY_PASSWORD"']
