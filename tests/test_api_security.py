@@ -6,7 +6,7 @@ import httpx2
 import pytest
 from pydantic import ValidationError
 
-from pulseops.config import ApiSettings
+from pulseops.config import ApiSettings, Settings
 from pulseops.main import create_app
 from pulseops.repositories import monitors as repository
 
@@ -129,6 +129,12 @@ def test_short_api_key_refuses_to_start_without_leaking_it():
         ApiSettings(api_key=short_key)
 
     assert short_key not in str(error.value)
+
+
+def test_api_settings_never_carry_the_broker_password():
+    # The API does not use the queue; only BrokerSettings (worker) has it.
+    assert "broker_url" not in Settings.model_fields
+    assert "broker_url" not in ApiSettings.model_fields
 
 
 async def test_docs_can_be_disabled(api_key):

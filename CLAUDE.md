@@ -244,12 +244,24 @@ Función que visita una URL con httpx2 y devuelve estado, código HTTP y latenci
 **Fase 4 — Checks automáticos (ArdiQ)**
 Lanzar los checks según el intervalo de cada monitor y guardar resultados.
 - Ya decidido: los checks se insertan con `ON CONFLICT DO NOTHING` sobre la PK `(monitor_id, scheduled_at)`, que los hace idempotentes frente a las reejecuciones de ArdiQ. `scheduled_at` es la hora en que tocaba el check, no la real.
-- A decidir (**decisión clave del MVP, investigar a fondo**): un cron global que cada pocos segundos mira qué monitores tocan vs. una tarea programada por monitor.
+- Decidido en el plan (los ADR se escriben al construir):
+  - **Planificador global:** un `@app.cron(every=5, coalesce=True)` reclama los monitores con `next_check_at <= now()` (columna nueva en `monitors`, migración `0002`) con `FOR UPDATE SKIP LOCKED`, como máximo 500 por turno. Encola `check_monitor(monitor_id, scheduled_at_ms)` con id fijo `check:<id>:<ms>` **antes** del commit: si encolar falla, rollback y el siguiente turno lo reintenta. La agenda vive en PostgreSQL, no en Valkey.
+  - **Siguiente turno:** `anterior + k × intervalo`; los periodos perdidos se saltan sin perder el ritmo de cada monitor.
+  - **Al crear, al cambiar la URL o el intervalo, o al reactivar:** `next_check_at = now()`. Planificar no cambia `updated_at`.
+  - **La tarea:**
+    - lee el monitor con una sesión, la cierra, hace el check y guarda con otra sesión: nunca tiene una conexión de BD abierta durante el check;
+    - si el monitor está borrado o desactivado, no hace nada.
+  - **Worker:** `concurrency=32`; carriles `checks` y `scheduler`, con `limits={"checks": 31}` para reservar un hueco al planificador. Cada tarea tiene `expire_ms` = su intervalo, `max_retries=3` (solo fallos de infraestructura) y `timeout=30`.
+  - **Logs:** la URL y el `error_detail` nunca van a los logs (pueden llevar tokens); solo `public_id`, arriba/caído, `error_kind` y ms. La tarea no lleva la URL, así que tampoco aparece en Valkey.
+  - **`BrokerSettings` aparte:** la API no recibe la contraseña de Valkey.
+  - **Tests:** Valkey se publica en `127.0.0.1` y los tests de ArdiQ usan una cola propia.
+  - **Verificación con `psql` como `pulseops_app`**, nunca como `postgres`.
 - Terminada cuando: al añadir una web aparecen comprobaciones solas.
 
 **Fase 5 — Estado y estadísticas**
 Endpoints de estado actual, uptime y latencia media; limpieza automática de datos de más de 30 días.
 - Ya decidido: el historial de checks se pagina **por cursor** sobre `(monitor_id, scheduled_at)`, no con offset.
+- Ya decidido: los huecos sin checks (por ejemplo, con el worker parado) cuentan como **"sin datos"**, ni arriba ni caída.
 - A decidir: cálculo del uptime (por número de checks o por tiempo).
 - Terminada cuando: se puede consultar cómo ha ido una web en la última semana.
 
@@ -260,6 +272,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 ### Post-MVP
 - **Pendiente sin fase asignada:** **códigos de respuesta esperados configurables por monitor.** Hoy, un 401/403 de una API protegida, o de una web que bloquea robots, sale como caída.
 - **Fase 7 — Alertas e incidentes:** Telegram, agrupar caídas en incidentes, anti-spam (p. ej. avisar tras N fallos seguidos).
+  - "Quién vigila al vigilante": que `/health` indique si el planificador ha funcionado hace poco, para poder alertar si se para.
 - **Fase 8 — Interfaz y métricas:** Grafana y/o HTMX; métricas Prometheus.
 - **Fase 9 — Despliegue:** VPS, Nginx o Caddy, dominio, HTTPS, despliegue automático.
   - En el proxy: límite de tamaño de las peticiones y de intentos fallidos de API key.
@@ -288,7 +301,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** Fase 4 — Checks automáticos (ArdiQ), **no empezada**: falta el modo plan. Rama `phase-4-automatic-checks` creada desde `main`. Fase 3 cerrada (PR #4 fusionado el 2026-10-27).
+- **Fase actual:** Fase 4 — Checks automáticos (ArdiQ), **en construcción** en la rama `phase-4-automatic-checks`. El plan está aprobado: decisiones en el roadmap. Fase 3 cerrada (PR #4 fusionado el 2026-10-27).
 - **Hecho en Fase 3:**
   - `pulseops/checker/` (`Checker`, `CheckOutcome`, backend de red con IP fijada, comando `python -m pulseops.checker`);
   - DNS en un pool de hilos propio;
@@ -343,4 +356,14 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:** la Fase 4 en modo plan (regla 8). Es la decisión clave del MVP: un cron global que mira qué monitores tocan o una tarea programada por monitor. Los cambios sin commit de este archivo y de `docs/evidence.md` (cierre de la Fase 3 y regla 16) van en el primer commit de la rama, con el OK de Toni.
+- **Siguiente paso:** construir la Fase 4 en el orden del plan:
+  1. `BrokerSettings`;
+  2. migración `0002`;
+  3. reclamar los monitores que tocan;
+  4. guardar un check;
+  5. reprogramar al editar;
+  6. la lógica de la tarea;
+  7. el envoltorio de ArdiQ y el worker;
+  8. Valkey en `127.0.0.1` y los tests contra Valkey real;
+  9. el servicio `worker` en Compose;
+  10. la documentación.
