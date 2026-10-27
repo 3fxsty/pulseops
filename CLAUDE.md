@@ -96,7 +96,8 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
 - **ArdiQ siempre con msgpack (su codec por defecto), nunca con pickle**, por el riesgo de ejecución de código en el worker.
 - **Secretos:**
   - Solo en `.env`, que nunca se sube; `.env.example` lleva valores falsos.
-  - `SecretStr` en `Settings`.
+  - `SecretStr` en `Settings`, y `hide_input_in_errors=True` en todas las clases de configuración: sin esto, Pydantic muestra el valor (por ejemplo, una API key demasiado corta) en el mensaje de error.
+  - Los valores de ejemplo que deban ser secretos son inválidos a propósito (`API_KEY=change-me` es demasiado corta), para que nada arranque con una clave pública.
   - Docker Compose exige los secretos (`${VAR:?}`) en lugar de usar valores por defecto débiles.
   - Escaneo de secretos con push protection en GitHub (ver "Estado actual").
 - **Dependencias** fijadas con `uv.lock`, con Dependabot activo.
@@ -250,7 +251,20 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** Fase 2 — API de monitores, **en curso** en la rama `phase-2-monitors-api`. Las decisiones están tomadas (ADR-017 a ADR-030). Fase 1 cerrada (PR #2 fusionado).
+- **Fase actual:** Fase 2 — API de monitores, **construida y verificada** en la rama `phase-2-monitors-api`. Falta que Toni la pruebe y abrir el PR.
+- **Hecho en Fase 2:**
+  - CRUD en `/api/v1/monitors` con API key;
+  - errores RFC 9457 + `code`;
+  - `security/` (normalización, SSRF y `ValidatedUrl`);
+  - `repositories/monitors.py`;
+  - `ApiSettings` y `DOCS_ENABLED`;
+  - API solo en `127.0.0.1:8000`;
+  - 143 tests.
+- **Cambios descubiertos en Fase 2:**
+  - `HttpUrl` de Pydantic rechaza por su cuenta las URLs de más de 2083 caracteres. El esquema usa ese mismo límite de entrada, para dar un error claro. El límite de 2048 tras normalizar se mantiene.
+  - FastAPI 0.162 guarda los routers incluidos como un bloque anidado (`_IncludedRouter`), no como rutas sueltas en `app.routes`.
+  - `Monitor` usa `eager_defaults`, que recoge `public_id` y las fechas con `RETURNING`. Sin esto, leer `updated_at` tras un UPDATE en async falla.
+  - El SSRF también bloquea los nombres internos de Docker (por ejemplo, `http://postgres:5432/` se resuelve a una IP privada). Lo he comprobado contra el stack real.
 - **Hecho en Fase 1:**
   - `config.py` con pydantic-settings;
   - modelos `Monitor` y `Check` en `pulseops/db/`;
@@ -277,4 +291,4 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:** construir la Fase 2 según el plan aprobado.
+- **Siguiente paso:** Toni prueba la Fase 2 → PR hacia `main`. Después, la Fase 3 (el comprobador) en modo plan (regla 8).
