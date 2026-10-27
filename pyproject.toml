@@ -25,7 +25,9 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
     "ruff>=0.17.2",
+    "trustme>=1.2.1",
 ]
 
 [tool.ruff]
@@ -40,3 +42,14 @@ select = ["E", "F", "I", "UP", "B", "S"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["pulseops"]
+branch = true
+# SQLAlchemy async runs code in greenlets; without this, lines that follow a
+# database call are wrongly reported as never executed.
+concurrency = ["greenlet", "thread"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
