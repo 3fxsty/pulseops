@@ -37,6 +37,10 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 
     Explica también los conceptos necesarios para que Toni pueda cuestionar la recomendación.
 13. **Verifica con tests el comportamiento de las librerías en lugar de suponerlo.** Ejemplo: `ipaddress.is_global` da como públicas direcciones multicast, NAT64 e IPv4-compatible (`::/96`).
+14. **Mantén `docs/evidence.md` (registro de datos verificados) al día.**
+    - Solo datos oficiales que salgan de un comando, un test o una prueba realmente hecha, con fecha y forma de reproducirlos. Nunca estimaciones ni datos de memoria.
+    - Al cerrar cada fase: añadir su fila a la tabla por fases (tests, Ruff, ADRs, verificación manual) y actualizar el desglose de tests, las garantías, las versiones y el tamaño.
+    - Cada hallazgo sobre una librería o comportamiento verificado va también a su tabla.
 
 ### El ciclo de cada fase
 0. **Planificar** (modo plan): Claude explica qué hay que investigar y decidir en la fase.
@@ -246,12 +250,13 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - **Calidad:** todo el código pasa Ruff y pytest antes de cada PR. Tests para cada pieza con lógica.
 - **Configuración:** variables de entorno (`.env`, con `.env.example` en el repo). Nunca subir secretos.
 - **Decisiones:** cada una en `docs/decisions.md`.
+- **Datos verificados** (tests, comprobaciones manuales, versiones, hallazgos): en `docs/evidence.md`.
 
 ---
 
 ## Estado actual
 
-- **Fase actual:** Fase 2 — API de monitores, **construida y verificada** en la rama `phase-2-monitors-api`. Falta que Toni la pruebe y abrir el PR.
+- **Fase actual:** Fase 2 — API de monitores **cerrada** (PR #3 fusionado el 2026-10-27, con 22/22 en la lista de pruebas manuales de Toni). Siguiente: Fase 3 — El comprobador (no empezada).
 - **Hecho en Fase 2:**
   - CRUD en `/api/v1/monitors` con API key;
   - errores RFC 9457 + `code`;
@@ -291,4 +296,8 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:** Toni prueba la Fase 2 → PR hacia `main`. Después, la Fase 3 (el comprobador) en modo plan (regla 8).
+- **Rama `phase-3-checker`:** ya existe en local (sin subir) con un único commit: este CLAUDE.md (Fase 2 cerrada, regla 14) y el nuevo `docs/evidence.md`. La Fase 3 **no ha empezado**: cuando Toni la apruebe, se continúa en esta rama, empezando en modo plan.
+- **Propuestas para decidir en la Fase 3** (no aprobadas todavía):
+  - medir la cobertura de los tests (por ejemplo, con `pytest-cov`) y apuntarla en `docs/evidence.md`;
+  - convertir la lista de pruebas manuales de la Fase 2 en un script reproducible dentro del repo (por ejemplo, `scripts/`).
+- **Siguiente paso:** cuando Toni lo apruebe, empezar la Fase 3 (el comprobador) en modo plan (regla 8). Ya hay decisiones tomadas y temas a decidir apuntados en su sección del roadmap.
