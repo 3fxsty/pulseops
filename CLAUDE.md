@@ -107,6 +107,14 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 - **Aislar ArdiQ en su propio módulo** (p. ej. `pulseops/queue/`) para poder sustituirlo sin tocar el resto.
 - Funciones a aprovechar: `@app.cron` con `coalesce=True` (no acumular checks atrasados), `ardiq doctor` (comprobar el broker), `ardiq status`, `app.metrics()` (y el endpoint de Prometheus previsto en 1.3, útil para Grafana).
 - Entrega "al menos una vez": las tareas deben poder ejecutarse dos veces sin causar problemas (idempotentes).
+- **Comprobado contra Valkey real** (Fase 4, `tests/test_queue_broker.py`):
+  - un `task_id` repetido se ignora **solo mientras la tarea existe**; después de terminar, se ejecuta otra vez;
+  - `expire_ms` descarta de verdad las tareas que no empiezan a tiempo;
+  - `ardiq.testing.inline` ignora los retrasos y `expire_ms`;
+  - no hay opción de timeout de conexión: un broker inalcanzable tarda unos 16 s en fallar.
+- **Hallazgos para el autor** (Toni abre las issues; se apuntan en `docs/evidence.md`, "Upstream issues"):
+  - la guía de `task_id` no aclara que el deduplicado acaba al terminar la tarea;
+  - en modo `burst`, un segundo `app.run()` sobre la misma instancia no procesa la cola. Reproducido con Redis 7.4.12 y Valkey 9.1.2.
 
 ### Valkey vs Redis
 ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que debería funcionar con ambos, pero no está probado oficialmente. **Plan:** en la Fase 0, levantar Valkey en Docker Compose y ejecutar `ardiq doctor`. Si pasa → Valkey. Si falla → Redis (cambio de una línea) y avisar al autor.
@@ -121,7 +129,13 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
   - `postgres`: superusuario, solo para administrar; la app nunca lo usa.
   - `pulseops_owner`: dueño del esquema, no es superusuario; solo lo usan las migraciones.
   - `pulseops_app`: lo usan la API y el worker; solo trabaja con filas (SELECT, INSERT, UPDATE, DELETE).
-- **Valkey** con contraseña. Los puertos de PostgreSQL y Valkey no se publican fuera de Docker; si hace falta en local, solo en `127.0.0.1`.
+- **Valkey** con contraseña. Los puertos de PostgreSQL y Valkey no se publican fuera de Docker; si hace falta en local, solo en `127.0.0.1`. Para los tests: PostgreSQL en `127.0.0.1:5432` y Valkey en `127.0.0.1:6380` (ADR-043).
+- **La API nunca recibe la contraseña de Valkey:** `broker_url` vive en `BrokerSettings`, que solo usa el worker (ADR-043).
+- **Las URLs de los monitores nunca van a los logs**, porque pueden llevar tokens (ADR-044):
+  - el worker registra solo `public_id`, arriba/caído, `error_kind` y ms, nunca la URL ni el `error_detail`;
+  - las tareas de la cola solo llevan ids;
+  - los loggers de `httpx2` y `httpcore2` están en WARNING (httpx2 registra cada URL a nivel INFO);
+  - el motor de la BD usa `hide_parameters=True`, para que los errores no lleven los parámetros de la consulta.
 - **ArdiQ siempre con msgpack (su codec por defecto), nunca con pickle**, por el riesgo de ejecución de código en el worker.
 - **Secretos:**
   - Solo en `.env`, que nunca se sube; `.env.example` lleva valores falsos.
@@ -244,7 +258,7 @@ Función que visita una URL con httpx2 y devuelve estado, código HTTP y latenci
 **Fase 4 — Checks automáticos (ArdiQ)**
 Lanzar los checks según el intervalo de cada monitor y guardar resultados.
 - Ya decidido: los checks se insertan con `ON CONFLICT DO NOTHING` sobre la PK `(monitor_id, scheduled_at)`, que los hace idempotentes frente a las reejecuciones de ArdiQ. `scheduled_at` es la hora en que tocaba el check, no la real.
-- Decidido en el plan (los ADR se escriben al construir):
+- Decidido (ADR-039 a ADR-045):
   - **Planificador global:** un `@app.cron(every=5, coalesce=True)` reclama los monitores con `next_check_at <= now()` (columna nueva en `monitors`, migración `0002`) con `FOR NO KEY UPDATE SKIP LOCKED`, como máximo 500 por turno. Encola `check_monitor(monitor_id, scheduled_at_us)` con id fijo `check:<id>:<µs>` **antes** del commit: si encolar falla, rollback y el siguiente turno lo reintenta. La agenda vive en PostgreSQL, no en Valkey.
   - **Siguiente turno:** `anterior + k × intervalo`; los periodos perdidos se saltan sin perder el ritmo de cada monitor.
   - **Al crear, al cambiar la URL o el intervalo, o al reactivar:** `next_check_at = now()`. Planificar no cambia `updated_at`.
@@ -256,12 +270,15 @@ Lanzar los checks según el intervalo de cada monitor y guardar resultados.
   - **`BrokerSettings` aparte:** la API no recibe la contraseña de Valkey.
   - **Tests:** Valkey se publica en `127.0.0.1` y los tests de ArdiQ usan una cola propia.
   - **Verificación con `psql` como `pulseops_app`**, nunca como `postgres`.
+  - **Latido del planificador:** tabla `scheduler_heartbeat` (migración `0003`), con `last_success_at` en la misma transacción de cada turno, incluidos los vacíos.
+  - **`restart: unless-stopped`** en `api`, `worker`, `postgres` y `valkey`; en `migrate`, no.
 - Terminada cuando: al añadir una web aparecen comprobaciones solas.
 
 **Fase 5 — Estado y estadísticas**
 Endpoints de estado actual, uptime y latencia media; limpieza automática de datos de más de 30 días.
 - Ya decidido: el historial de checks se pagina **por cursor** sobre `(monitor_id, scheduled_at)`, no con offset.
 - Ya decidido: los huecos sin checks (por ejemplo, con el worker parado) cuentan como **"sin datos"**, ni arriba ni caída.
+- Pendiente de la Fase 4: ampliar `scripts/smoke_test.py` para que compruebe que un monitor nuevo recibe checks. Se hará por la API cuando exista el endpoint de historial; hasta entonces se mira con `psql`.
 - A decidir: cálculo del uptime (por número de checks o por tiempo).
 - Terminada cuando: se puede consultar cómo ha ido una web en la última semana.
 
@@ -272,7 +289,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 ### Post-MVP
 - **Pendiente sin fase asignada:** **códigos de respuesta esperados configurables por monitor.** Hoy, un 401/403 de una API protegida, o de una web que bloquea robots, sale como caída.
 - **Fase 7 — Alertas e incidentes:** Telegram, agrupar caídas en incidentes, anti-spam (p. ej. avisar tras N fallos seguidos).
-  - "Quién vigila al vigilante": que `/health` indique si el planificador ha funcionado hace poco, para poder alertar si se para.
+  - "Quién vigila al vigilante": que `/health` indique si el planificador ha funcionado hace poco, para poder alertar si se para. El dato ya existe desde la Fase 4: `scheduler_heartbeat.last_success_at` (ADR-045).
 - **Fase 8 — Interfaz y métricas:** Grafana y/o HTMX; métricas Prometheus.
 - **Fase 9 — Despliegue:** VPS, Nginx o Caddy, dominio, HTTPS, despliegue automático.
   - En el proxy: límite de tamaño de las peticiones y de intentos fallidos de API key.
@@ -301,14 +318,27 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** Fase 4 — Checks automáticos (ArdiQ), **en construcción** en la rama `phase-4-automatic-checks`. El plan está aprobado: decisiones en el roadmap. Fase 3 cerrada (PR #4 fusionado el 2026-10-27).
-- **Cambios descubiertos en Fase 4 (durante la construcción):**
+- **Fase actual:** Fase 4 — Checks automáticos (ArdiQ), **construida** en la rama `phase-4-automatic-checks`. Falta que Toni la pruebe y el PR. Fase 3 cerrada (PR #4 fusionado el 2026-10-27).
+- **Hecho en Fase 4:**
+  - el worker (`ardiq run pulseops.worker:app`) con un planificador cada 5 s y la tarea `check_monitor`;
+  - migraciones `0002` (`next_check_at`) y `0003` (`scheduler_heartbeat`);
+  - repositorios de planificación y de checks;
+  - reprogramación al editar;
+  - `BrokerSettings`;
+  - servicio `worker` en Compose y `restart: unless-stopped`;
+  - Valkey en `127.0.0.1:6380` para los tests;
+  - 213 tests (cobertura del 97 %), 4 de ellos contra Valkey real;
+  - ADR-039 a ADR-045.
+- **Cambios descubiertos en Fase 4:**
   - **httpx2 registra cada URL visitada a nivel INFO** (`HTTP Request: GET <url>`), y httpcore2 da aún más detalle a nivel DEBUG. Como `ardiq run` muestra INFO, los tokens de las URLs habrían acabado en los logs. El comprobador sube esos dos loggers a WARNING. Hay un test que lo demuestra.
   - **SQLAlchemy mete los parámetros de la consulta en sus mensajes de error**, y estos podrían incluir el `error_detail` con la URL. ArdiQ guarda el error de cada tarea fallida en su log y en la cola de fallidas. Por eso el motor usa `hide_parameters=True`. El `BrokerError` de ArdiQ no muestra la contraseña de Valkey.
   - **`UPDATE … RETURNING` no conserva el orden del `CTE`.** Un test fallaba de forma aleatoria; ahora se ordena en Python.
   - **La reclamación usa `FOR NO KEY UPDATE`, no `FOR UPDATE`.** Con el candado fuerte, guardar un check de un monitor reclamado esperaba al commit del planificador, porque la clave foránea pide un candado compartido. Hay un test que lo demuestra.
   - **`scheduled_at` viaja en microsegundos, no en milisegundos.** PostgreSQL guarda microsegundos, y con milisegundos el check no caería exactamente en el turno reclamado.
   - **Añadir `next_check_at` con `DEFAULT now()` no reescribe la tabla:** `now()` no es volátil, así que PostgreSQL lo guarda como valor por defecto (`atthasmissing`). Comprobado en PostgreSQL 18.
+  - **En la máquina de desarrollo, el puerto 6379 lo ocupa otro Redis** (el del repo de ArdiQ). Por eso Valkey se publica en el 6380.
+  - **El test del log sin contraseña tarda unos 10 s,** porque ArdiQ reintenta la conexión y no tiene opción para acortarlo. La suite pasa de ~7 s a ~17 s.
+  - **`example.com` sigue sin responder desde la red de desarrollo** (repetido el 2026-10-27 a las 23:33 UTC, ya de madrugada en España y fuera de horario de partidos). La hipótesis "solo durante los partidos" no se confirma; la causa sigue estando en la red. Para verificar se sigue usando Google.
 - **Hecho en Fase 3:**
   - `pulseops/checker/` (`Checker`, `CheckOutcome`, backend de red con IP fijada, comando `python -m pulseops.checker`);
   - DNS en un pool de hilos propio;
@@ -318,7 +348,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - ADR-031 a ADR-038.
 - **Cambios descubiertos en Fase 3:**
   - Desde la red de desarrollo, `example.com` (sus IPs de Cloudflare) no responde: la conexión se corta, también con `curl`. Otras webs, incluso detrás de Cloudflare, funcionan. Para verificar, se usa `https://www.google.com`.
-    - **Pendiente:** repetir `example.com` el 2026-10-28 para confirmar que era cosa de la red. Hipótesis de Toni: en España, algunas operadoras bloquean IPs de Cloudflare durante los partidos de LaLiga.
+    - Repetido el 2026-10-28: sigue igual (ver "Cambios descubiertos en Fase 4").
   - httpbin.org y httpbingo.org ya no redirigen a destinos arbitrarios (403 con una lista blanca), así que no sirven para probar "redirección a una IP interna". Para eso están los tests automáticos y los nombres DNS públicos tipo `169.254.169.254.nip.io`.
   - La cobertura necesita `concurrency = ["greenlet", "thread"]`: SQLAlchemy async ejecuta código en greenlets, y sin esto marca como no ejecutadas líneas que sí lo están.
   - httpcore2 hace el handshake TLS con el nombre del origen (`server_hostname`), no con la IP conectada; por eso fijar la IP no rompe HTTPS.
@@ -360,17 +390,16 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - ADR-001 a ADR-008.
 - **Pendiente de decidir:** interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
 - **Pendiente de hacer (Toni):** activar el escaneo de secretos con push protection en GitHub. El repo es privado y ahí GitHub no lo ofrece gratis (requiere Secret Protection, de pago): revisar los ajustes del repo o activarlo cuando el repo pase a público.
+- **Pendiente de hacer (Toni):** abrir las issues de ArdiQ (`task_id` y el segundo `run()` en modo burst). Después, apuntar los enlaces en `docs/evidence.md`, "Upstream issues".
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
+  - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:** construir la Fase 4 en el orden del plan:
-  1. `BrokerSettings`;
-  2. migración `0002`;
-  3. reclamar los monitores que tocan;
-  4. guardar un check;
-  5. reprogramar al editar;
-  6. la lógica de la tarea;
-  7. el envoltorio de ArdiQ y el worker;
-  8. Valkey en `127.0.0.1` y los tests contra Valkey real;
-  9. el servicio `worker` en Compose;
-  10. la documentación.
+- **Siguiente paso:** que Toni pruebe la Fase 4 con la verificación del plan:
+  1. crear un monitor y ver sus checks con `psql` como `pulseops_app`;
+  2. un 404;
+  3. pausarlo;
+  4. `docker compose restart worker valkey` sin duplicados;
+  5. `ardiq status`.
+
+  Después, el PR a `main`, con su OK.

@@ -13,9 +13,17 @@ cp .env.example .env   # then replace every change-me value
 docker compose up --build
 ```
 
-Compose refuses to start without the secrets in `.env`, and the API refuses to start without a valid `API_KEY` (at least 32 characters, e.g. `openssl rand -base64 32`). On start-up, the one-shot `migrate` service applies the database migrations and exits. The API starts only after it succeeds.
+Compose refuses to start without the secrets in `.env`, and the API refuses to start without a valid `API_KEY` (at least 32 characters, e.g. `openssl rand -base64 32`). On start-up, the one-shot `migrate` service applies the database migrations and exits. The API and the worker start only after it succeeds.
 
-The API listens on `127.0.0.1:8000` only.
+| Service | Role | Exposed on |
+|---|---|---|
+| `api` | FastAPI: manage monitors | `127.0.0.1:8000` |
+| `worker` | ArdiQ: schedules and runs the checks | — |
+| `postgres` | Monitors and check history | `127.0.0.1:5432` (for tests) |
+| `valkey` | ArdiQ's queue | `127.0.0.1:6380` (for tests) |
+| `migrate` | Applies migrations once, then exits | — |
+
+Every long-running service restarts on its own after a crash (`restart: unless-stopped`).
 
 - API health check: <http://localhost:8000/health>
 - Swagger UI: <http://localhost:8000/docs>. Click **Authorize** and paste your `API_KEY`.
@@ -74,11 +82,11 @@ uv run alembic check                                        # fail if models and
 
 ## Development
 
-Requirements: [uv](https://docs.astral.sh/uv/), and PostgreSQL running (`docker compose up -d postgres`) for the tests.
+Requirements: [uv](https://docs.astral.sh/uv/), and PostgreSQL and Valkey running (`docker compose up -d postgres valkey`) for the tests.
 
 ```bash
 uv sync                # install dependencies (Python 3.13 is fetched automatically)
-uv run pytest          # run the tests (against the separate pulseops_test database)
+uv run pytest          # run the tests (pulseops_test database, Valkey logical database 1)
 uv run pytest --cov    # same, with a coverage report
 uv run ruff check .    # lint, including security rules
 uv run ruff format .   # format
@@ -98,3 +106,38 @@ uv run python scripts/smoke_test.py
 ## Checker
 
 A site is **down** if it does not answer, returns 4xx/5xx, or takes more than 10 s (one deadline for DNS, connection, TLS, up to 5 redirects and the final headers). The body is never downloaded. Every TCP connection, including each redirect, is SSRF-checked at connect time and pinned to the validated IP. Failures are classified as `timeout`, `dns_error`, `connection_error`, `ssl_error`, `http_error` or `blocked_target`.
+
+## Automatic checks
+
+The `worker` service runs the scheduler and the checks (ArdiQ on Valkey):
+
+1. **Every 5 s, the scheduler** claims the active monitors whose `next_check_at` has come, moves each one to its next slot and enqueues one check per monitor.
+   - The schedule lives in PostgreSQL, so losing the queue costs at most one check.
+   - Missed slots (worker down) are skipped, not caught up.
+2. **The worker runs each check** with the checker and stores the outcome in `checks`.
+   - The `scheduled_at` of each check is the time it was due.
+   - A re-delivered check is stored only once.
+3. **A new monitor is checked within a few seconds.** Changing its URL or interval, or reactivating it, brings its next check forward to now. Pausing or deleting it stops its checks.
+4. **Every successful scheduler tick stamps `scheduler_heartbeat`**, even when nothing is due, so a stalled scheduler can be detected.
+
+The worker's logs show one line per check with the monitor's public id, up/down, the error kind and the response time. They never show the URL, which may carry tokens:
+
+```bash
+docker compose logs -f worker
+```
+
+Until the history endpoints arrive (Phase 5), look at the checks with `psql`, as the app role:
+
+```bash
+docker compose exec postgres sh -c 'psql "postgresql://pulseops_app:$PULSEOPS_APP_PASSWORD@127.0.0.1/pulseops" -c "
+  SELECT m.name, c.scheduled_at, c.is_up, c.status_code, c.response_time_ms, c.error_kind
+  FROM checks c JOIN monitors m ON m.id = c.monitor_id
+  ORDER BY c.scheduled_at DESC LIMIT 20"'
+
+# When the scheduler last completed a tick
+docker compose exec postgres sh -c 'psql "postgresql://pulseops_app:$PULSEOPS_APP_PASSWORD@127.0.0.1/pulseops" -c "
+  SELECT last_success_at, now() - last_success_at AS age FROM scheduler_heartbeat"'
+
+# The queue: crons, lanes, workers
+docker compose exec worker ardiq status pulseops.worker:app
+```
