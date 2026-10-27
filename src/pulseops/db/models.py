@@ -9,6 +9,7 @@ from sqlalchemy import (
     SmallInteger,
     String,
     func,
+    text,
     true,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -35,6 +36,13 @@ class Monitor(Base):
             "interval_seconds BETWEEN 30 AND 86400",
             name="interval_seconds_range",
         ),
+        # The scheduler asks "which active monitors are due?" every few
+        # seconds; inactive ones are left out of the index entirely.
+        Index(
+            "ix_monitors_next_check_at_active",
+            "next_check_at",
+            postgresql_where=text("is_active"),
+        ),
     )
     # Fetch server-generated values (public_id, timestamps) with RETURNING on
     # INSERT and UPDATE, instead of a second query.
@@ -54,6 +62,9 @@ class Monitor(Base):
     updated_at: Mapped[datetime] = mapped_column(
         server_default=func.now(), onupdate=func.now()
     )
+    # When the next check is due. The schedule lives here, in PostgreSQL, not
+    # in the queue: losing Valkey costs at most one check per monitor.
+    next_check_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
     # PostgreSQL deletes the checks (ON DELETE CASCADE); passive_deletes stops
     # the ORM from loading them all into memory first.

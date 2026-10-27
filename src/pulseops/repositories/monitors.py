@@ -83,10 +83,28 @@ async def update_monitor(
     unknown = changes.keys() - UPDATABLE_FIELDS
     if unknown:
         raise ValueError(f"Not updatable: {sorted(unknown)}")
-    for field, value in changes.items():
-        setattr(monitor, field, _require_validated(value) if field == "url" else value)
+    values = {
+        field: _require_validated(value) if field == "url" else value
+        for field, value in changes.items()
+    }
+    reschedule = _needs_check_now(monitor, values)
+    for field, value in values.items():
+        setattr(monitor, field, value)
+    if reschedule:
+        monitor.next_check_at = func.now()
     await _commit(session)
     return monitor
+
+
+def _needs_check_now(monitor: Monitor, values: Mapping[str, object]) -> bool:
+    """A new URL or interval, or a reactivation, gets checked right away.
+
+    Otherwise going from a 1-day interval to 30 s would still wait for the old
+    slot, possibly a day away.
+    """
+    changed = {f for f, v in values.items() if getattr(monitor, f) != v}
+    reactivated = "is_active" in changed and values["is_active"]
+    return bool(changed & {"url", "interval_seconds"}) or reactivated
 
 
 async def delete_monitor(session: AsyncSession, monitor: Monitor) -> None:
