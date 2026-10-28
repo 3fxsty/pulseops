@@ -1,10 +1,12 @@
 """Measure the history, stats and retention queries on realistic data.
 
-    uv run python scripts/measure_queries.py [--plans]
+    uv run python scripts/measure_queries.py [--plans] [--monitors N]
+        [--days N] [--interval SECONDS]
 
-Runs against the TEST database (TEST_DATABASE_URL, never development data):
-10 monitors x 31 days of checks every 30 s (~893,000 rows), inserted in time
-order as the worker would. The first day is past the 30-day retention.
+Runs against the TEST database (TEST_DATABASE_URL, never development data).
+By default: 10 monitors x 31 days of checks every 30 s (~893,000 rows),
+inserted in time order as the worker would. Whatever is older than 30 days
+is past retention (the first day, by default).
 
 For each query it prints the plan's access path, EXPLAIN ANALYZE's execution
 time and the median of 20 real runs. The queries are the repository's own
@@ -49,9 +51,9 @@ from pulseops.repositories.checks import (
 from pulseops.retention import BATCH_SIZE, RETENTION, purge_expired_checks
 
 ROOT = Path(__file__).resolve().parent.parent
-MONITORS = 10
-DAYS = 31
-INTERVAL = timedelta(seconds=30)
+DEFAULT_MONITORS = 10
+DEFAULT_DAYS = 31
+DEFAULT_INTERVAL_SECONDS = 30
 RUNS = 20
 
 
@@ -109,27 +111,29 @@ async def median_ms(run, runs: int = RUNS) -> float:
     return statistics.median(timings)
 
 
-async def seed(sessions, owner_engine) -> list[int]:
+async def seed(
+    sessions, owner_engine, *, monitors: int, days: int, interval: timedelta
+) -> list[int]:
     async with sessions() as session:
-        monitors = [
+        created = [
             Monitor(
                 name=f"measure-{n}",
                 url=f"https://measure-{uuid.uuid4()}.invalid/",
-                interval_seconds=int(INTERVAL.total_seconds()),
+                interval_seconds=int(interval.total_seconds()),
                 is_active=False,
             )
-            for n in range(MONITORS)
+            for n in range(monitors)
         ]
-        session.add_all(monitors)
+        session.add_all(created)
         await session.commit()
-        ids = [monitor.id for monitor in monitors]
+        ids = [monitor.id for monitor in created]
 
         # Every monitor at every 30 s slot, oldest first (the worker's order,
         # which is what makes a BRIN index on scheduled_at useful).
         slots = (
             select(
                 func.generate_series(
-                    func.now() - timedelta(days=DAYS), func.now(), INTERVAL
+                    func.now() - timedelta(days=days), func.now(), interval
                 ).label("at")
             )
         ).subquery("slots")
@@ -138,7 +142,8 @@ async def seed(sessions, owner_engine) -> list[int]:
             .where(Monitor.id.in_(ids))
             .subquery("measured")
         )
-        step = func.floor(func.extract("epoch", slots.c.at) / 30)
+        seconds = int(interval.total_seconds())
+        step = func.floor(func.extract("epoch", slots.c.at) / seconds)
         down = (step % 997) == 0  # about 0.1 % of checks down
         rows = (
             select(
@@ -176,7 +181,7 @@ async def seed(sessions, owner_engine) -> list[int]:
     return ids
 
 
-async def main(show_plans: bool) -> None:
+async def main(show_plans: bool, monitors: int, days: int, interval: timedelta) -> None:
     settings = MeasureSettings()
     config = Config(ROOT / "alembic.ini")
     config.attributes["database_url"] = (
@@ -192,7 +197,9 @@ async def main(show_plans: bool) -> None:
     ids: list[int] = []
     try:
         started = time.perf_counter()
-        ids = await seed(sessions, owner_engine)
+        ids = await seed(
+            sessions, owner_engine, monitors=monitors, days=days, interval=interval
+        )
         async with sessions() as session:
             total = await session.scalar(select(func.count()).select_from(Check))
             expired = await session.scalar(
@@ -201,8 +208,8 @@ async def main(show_plans: bool) -> None:
                 .where(Check.scheduled_at < func.now() - RETENTION)
             )
         print(
-            f"Seeded {total:,} checks ({MONITORS} monitors x {DAYS} days every "
-            f"{INTERVAL.seconds} s; {expired:,} past retention) in "
+            f"Seeded {total:,} checks ({monitors} monitors x {days} days every "
+            f"{interval.seconds} s; {expired:,} past retention) in "
             f"{time.perf_counter() - started:.1f} s\n"
         )
 
@@ -222,7 +229,7 @@ async def main(show_plans: bool) -> None:
 
         cases = [
             (
-                "stats, 30d (86,400 rows)",
+                "stats, 30d",
                 stats_statement(monitor_id=monitor_id, period=timedelta(days=30)),
                 lambda: run_stats(timedelta(days=30)),
             ),
@@ -242,14 +249,14 @@ async def main(show_plans: bool) -> None:
                 lambda: run_history(middle),
             ),
             (
-                f"retention batch ({BATCH_SIZE:,}), 1-day backlog",
+                f"retention batch ({BATCH_SIZE:,}), backlog",
                 expired_batch_statement(retention=RETENTION, batch_size=BATCH_SIZE),
                 None,
             ),
             (
                 "retention batch, hourly steady state",
                 expired_batch_statement(
-                    retention=timedelta(days=DAYS) - timedelta(hours=1),
+                    retention=timedelta(days=days) - timedelta(hours=1),
                     batch_size=BATCH_SIZE,
                 ),
                 None,
@@ -266,9 +273,12 @@ async def main(show_plans: bool) -> None:
 
         started = time.perf_counter()
         purged = await purge_expired_checks(sessions)
+        elapsed = time.perf_counter() - started
+        batches = max(1, -(-purged // BATCH_SIZE))
         print(
             f"\nFull retention run: deleted {purged:,} expired checks in "
-            f"{time.perf_counter() - started:.2f} s"
+            f"{elapsed:.2f} s ({batches} batches, {elapsed / batches * 1000:.1f} ms "
+            "per batch)"
         )
     finally:
         if ids:
@@ -282,4 +292,12 @@ async def main(show_plans: bool) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--plans", action="store_true", help="print full plans")
-    asyncio.run(main(parser.parse_args().plans))
+    parser.add_argument("--monitors", type=int, default=DEFAULT_MONITORS)
+    parser.add_argument("--days", type=int, default=DEFAULT_DAYS)
+    parser.add_argument(
+        "--interval", type=int, default=DEFAULT_INTERVAL_SECONDS, help="seconds"
+    )
+    args = parser.parse_args()
+    asyncio.run(
+        main(args.plans, args.monitors, args.days, timedelta(seconds=args.interval))
+    )

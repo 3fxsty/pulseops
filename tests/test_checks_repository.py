@@ -7,7 +7,9 @@ from sqlalchemy import func, insert, select
 from pulseops.checker import CheckOutcome
 from pulseops.db.models import Check, Monitor
 from pulseops.repositories.checks import (
+    CTID,
     check_stats,
+    delete_at_addresses_statement,
     delete_expired_checks,
     latest_check,
     list_checks,
@@ -199,3 +201,28 @@ async def test_delete_expired_checks_deletes_one_batch_at_a_time(session):
 
     assert first == 2
     assert len(await stored_checks(session, monitor.id)) == 3
+
+
+async def test_an_address_reused_by_a_recent_check_is_never_deleted(session):
+    # Simulates the case the date recheck guards against: the list of
+    # addresses to delete points at a recent check (as if an expired row's
+    # address had been reused). Only the expired one may go.
+    monitor = await add_monitor(session)
+    await add_check(session, monitor.id, ago=timedelta(days=31))
+    await add_check(session, monitor.id, ago=timedelta(days=1))
+    cutoff = func.now() - timedelta(days=30)
+    every_address = func.array(
+        select(CTID)
+        .select_from(Check.__table__)
+        .where(Check.monitor_id == monitor.id)
+        .scalar_subquery()
+    )
+
+    result = await session.execute(
+        delete_at_addresses_statement(every_address, older_than=cutoff)
+    )
+    await session.commit()
+
+    assert result.rowcount == 1
+    [kept] = await stored_checks(session, monitor.id)
+    assert kept.scheduled_at > await session.scalar(select(cutoff))

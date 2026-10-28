@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import Delete, Select, delete, func, select, tuple_
+from sqlalchemy import Delete, Select, any_, column, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +11,8 @@ from pulseops.checker import CheckOutcome
 from pulseops.db.models import Check
 
 MONITOR_FOREIGN_KEY = "fk_checks_monitor_id_monitors"
+# A row's physical address in the table (PostgreSQL system column).
+CTID = column("ctid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,14 +94,34 @@ def stats_statement(*, monitor_id: int, period: timedelta) -> Select:
 
 
 def expired_batch_statement(*, retention: timedelta, batch_size: int) -> Delete:
+    """Delete by physical row address (ctid), never by joining on the key.
+
+    The inner SELECT finds one batch of expired rows (through the BRIN index
+    on scheduled_at, or the primary key when PostgreSQL finds it cheaper) and
+    ARRAY() turns their addresses into a list, computed once. The DELETE then
+    visits exactly those addresses (a TID scan). Joining on (monitor_id,
+    scheduled_at) instead let the planner pick a hash join over a full table
+    scan for some statistics samples: every batch would read the whole table.
+    """
+    cutoff = func.now() - retention
     expired = (
-        select(Check.monitor_id, Check.scheduled_at)
-        .where(Check.scheduled_at < func.now() - retention)
+        select(CTID)
+        .select_from(Check.__table__)
+        .where(Check.scheduled_at < cutoff)
         .limit(batch_size)
+        .scalar_subquery()
     )
-    return delete(Check).where(
-        tuple_(Check.monitor_id, Check.scheduled_at).in_(expired.scalar_subquery())
-    )
+    return delete_at_addresses_statement(func.array(expired), older_than=cutoff)
+
+
+def delete_at_addresses_statement(addresses, *, older_than) -> Delete:
+    """Delete the rows at these addresses, but only if they are still expired.
+
+    Selection and deletion run in one statement, so an address cannot be
+    reused in between; the date is checked again anyway (defence in depth):
+    an address that pointed at a recent check would delete nothing.
+    """
+    return delete(Check).where(CTID == any_(addresses), Check.scheduled_at < older_than)
 
 
 async def list_checks(

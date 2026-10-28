@@ -332,10 +332,16 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 - **Fase actual:** Fase 5 — Estado y estadísticas, **en construcción**. El plan está aprobado y las decisiones están en el roadmap. Rama `phase-5-status-and-stats` creada desde `main`. Fase 4 cerrada (PR #5 fusionado el 2026-10-27, verificada por Toni).
 - **Cambios descubiertos en Fase 5 (durante la construcción):**
-  - **Medición** (`scripts/measure_queries.py`, 10 monitores, 892 810 checks):
-    - `/stats` de 30 días tarda unos 20 ms y el historial unos 2 ms por página, así que calcular al vuelo basta;
-    - el borrado con un día atrasado usa el índice BRIN;
-    - en el borrado normal de cada hora, PostgreSQL 18 elige la PK con *skip scan* (una búsqueda por monitor), no el BRIN. En ningún caso recorre la tabla entera. Con miles de monitores debería pasar al BRIN (no verificado). Se deja elegir al planificador.
+  - **Medición** (`scripts/measure_queries.py`, 10 monitores, 892 810 checks): `/stats` de 30 días tarda unos 20 ms y el historial unos 1,7 ms por página, así que calcular al vuelo basta.
+  - **El borrado por lotes no era estable con `(monitor_id, scheduled_at) IN (subconsulta)`.**
+    - Según la muestra de estadísticas, PostgreSQL elegía un *hash join* con `Seq Scan` de la tabla entera: 99 ms por lote, y crecería con la tabla.
+    - **Ahora se borra por `ctid`** (la dirección física de la fila): `ctid = ANY(ARRAY(SELECT ctid … LIMIT 5000)) AND scheduled_at < corte` y un `Tid Scan`, sin cruce.
+    - **La fecha se vuelve a comprobar en el propio `DELETE`** (condición de Toni): si una dirección apuntara a un check reciente, no se borra. La selección y el borrado van en la misma sentencia; hay un test que lo simula.
+    - En 5 ejecuciones, ningún `Seq Scan`.
+  - **Qué índice usa el borrado:**
+    - con atraso usa el BRIN;
+    - en el borrado normal de cada hora, PostgreSQL 18 elige la PK con *skip scan* (una búsqueda por monitor): 0,7 ms con 10 monitores y 4,8 ms con 1 000;
+    - el paso al BRIN con muchos más monitores no está verificado. Se deja elegir al planificador.
   - **El carril `maintenance` exigía bajar `checks` a 30.** Con `checks` en 31 y la limpieza ocupando 1, el planificador no se ejecutaba (comprobado contra Valkey real).
   - **`pulseops/timestamps.py`:** las funciones de microsegundos salen de `queue/tasks.py`, porque si la API importara ese módulo se crearía la app de ArdiQ, que necesita `BROKER_URL`, y la API ya no la tiene.
   - **Solo el dueño de una tabla puede ejecutar `ANALYZE`:** el script lo hace como `pulseops_owner`. En producción lo hace el autovacuum.
