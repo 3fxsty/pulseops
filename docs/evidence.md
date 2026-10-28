@@ -168,6 +168,9 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | SQLAlchemy 2.1 compiles `percentile_cont(…).within_group(…).filter(…)` to `percentile_cont(…) WITHIN GROUP (ORDER BY …) FILTER (WHERE …)` | Mean and p95 in one query |
 | ArdiQ lane limits hold: with limits 30 + 1 out of 32 slots, a third lane always gets a slot; with 31 + 1 it gets none | `checks` limited to 30 (ADR-051) |
 | 17 decimal digits of microseconds reach the year 5138 | The cursor allows at most 17 digits |
+| PostgreSQL's default error log adds the values behind a constraint error: `DETAIL: Key (url)=(<full URL>) already exists` on a duplicate, `Failing row contains (…)` on a CHECK. The development stack's log had 50 and 24 such lines. With `log_error_verbosity=terse` only the `ERROR` line (constraint name) and the `STATEMENT` line remain; the app's statements are parameterised (`$1`), so no value is logged | PostgreSQL starts with `log_error_verbosity=terse` (ADR-044); `test_error_log_leaves_out_row_values` |
+| `docker compose up --wait` (Compose v5.6.1) returns 0 when a one-shot service exits with 0 and the rest are healthy or running, and 1 when the one-shot fails | The CI `stack` job waits on the whole stack, `migrate` included |
+| Docker Hub limits anonymous registry requests to 100 per hour per address (`ratelimit-limit: 100;w=3600`); `docker buildx imagetools inspect` makes several per image | Digests looked up sparingly; GitHub-hosted runners pull without hitting it |
 
 ## Query performance (2026-10-28)
 

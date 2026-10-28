@@ -971,7 +971,7 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 
 ---
 
-## ADR-044 — Secrets and URLs stay out of the worker's logs
+## ADR-044 — Secrets and URLs stay out of the logs
 
 - **Date:** 2026-10-27 (Phase 4)
 - **Status:** Accepted
@@ -985,8 +985,12 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 - **The scheduler's errors are logged, not raised.** A failing tick (database or Valkey down) logs `scheduling failed, retrying next tick: <error>` and returns 0. The claim has rolled back, so the next tick, 5 s later, retries the same slots.
   - **Why:** raising would add a dead letter every 5 s for as long as the outage lasts.
   - **The password stays out:** ArdiQ's errors do not include the Valkey password (`test_scheduler_error_log_never_shows_the_broker_password`, against the real Valkey with a wrong password).
+- **PostgreSQL's own error log: `log_error_verbosity=terse`** (added 2026-10-28, Phase 6, found while checking what a failed CI job would print).
+  - **Why:** on a duplicate monitor URL (the 409 path), PostgreSQL logs `DETAIL: Key (url)=(<the full URL>) already exists`; a CHECK violation logs the whole failing row. Our code never writes these lines: the server does.
+  - **What terse does:** it drops the `DETAIL`, `HINT` and `CONTEXT` lines and keeps the `ERROR` line with the constraint's name. The `STATEMENT` line stays, but the app sends parameterised queries (`$1`), so it carries no values. Verified on a throwaway PostgreSQL 18 with a URL carrying a token.
+  - **Where:** in `docker-compose.yml` (`postgres -c log_error_verbosity=terse`), so it also applies to existing volumes. `test_error_log_leaves_out_row_values` failed before the change.
 
-**Weak point.** While ticks fail, `ardiq status` reports the cron's last run as succeeded. The scheduler heartbeat (ADR-045) is the reliable signal.
+**Weak point.** While ticks fail, `ardiq status` reports the cron's last run as succeeded. The scheduler heartbeat (ADR-045) is the reliable signal. Debugging a database error without its `DETAIL` line is harder; switch the setting back to `default` for a while if needed.
 
 **Reversibility.** Easy.
 

@@ -136,6 +136,7 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
   - las tareas de la cola solo llevan ids;
   - los loggers de `httpx2` y `httpcore2` están en WARNING (httpx2 registra cada URL a nivel INFO);
   - el motor de la BD usa `hide_parameters=True`, para que los errores no lleven los parámetros de la consulta.
+  - PostgreSQL arranca con `log_error_verbosity=terse` (en el Compose). Sin esto, al repetir una URL (el 409) escribe en su propio log `DETAIL: Key (url)=(<la URL>) already exists`, y en una CHECK, la fila entera.
 - **ArdiQ siempre con msgpack (su codec por defecto), nunca con pickle**, por el riesgo de ejecución de código en el worker.
 - **Secretos:**
   - Solo en `.env`, que nunca se sube; `.env.example` lleva valores falsos.
@@ -351,6 +352,10 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 ## Estado actual
 
 - **Fase actual:** Fase 6 — CI y presentación, en modo plan (rama `phase-6-ci-and-presentation`). Fase 5 cerrada (PR #6 fusionado el 2026-10-28, verificada por Toni).
+- **Cambios descubiertos en Fase 6 (durante la construcción):**
+  - **PostgreSQL escribía las URLs en su log de errores.** Al repetir una URL salía `DETAIL: Key (url)=(<URL>) already exists`, y en una CHECK, la fila entera. Lo escribe el propio servidor, no nuestro código. Arreglado con `log_error_verbosity=terse` (ADR-044) y un test.
+  - **Docker Hub limita las consultas anónimas a 100 por hora** (cabecera `ratelimit-limit: 100;w=3600`). Inspeccionar digests con `docker buildx imagetools inspect` gasta varias por imagen. Los runners de GitHub descargan sin problema.
+  - **`docker compose up --wait` acepta que `migrate` termine con 0** (y falla si `migrate` falla). Verificado con Compose v5.6.1.
 - **Hecho en Fase 5:**
   - `GET /api/v1/monitors/{id}/checks` (historial con cursor opaco) y `GET /api/v1/monitors/{id}/stats` (estado actual, uptime, media y p95, recuentos);
   - `pulseops/status.py`, `pulseops/timestamps.py` y `api/cursors.py`;
