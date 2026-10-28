@@ -297,6 +297,25 @@ Endpoints de estado actual, uptime y latencia media; limpieza automática de dat
 
 **Fase 6 — CI y presentación**
 GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic check`), README con diagrama, instrucciones y capturas.
+- Decidido (plan aprobado el 2026-10-28; los ADR se escriben al documentar):
+  - **PostgreSQL y Valkey en CI con el mismo `docker compose`** que en local, no con los services de GitHub: estos no pueden montar el script de roles ni arrancar Valkey con contraseña.
+  - **Tres jobs en `.github/workflows/ci.yml`:**
+    - `lint`: Ruff check + format;
+    - `test`: pytest con cobertura, más `alembic upgrade head` + `alembic check` como paso propio;
+    - `stack`: `docker compose up --build --wait` + `scripts/smoke_test.py`, con los logs del Compose si falla.
+  - **Secretos de CI:** un `.env` nuevo en cada ejecución a partir de `.env.example`, con valores aleatorios ocultos en los logs (`::add-mask::`). Ninguna contraseña escrita en el repo.
+  - **Seguridad del workflow** (pasa a "Seguridad" al construirlo):
+    - acciones fijadas por SHA, con un comentario de la versión;
+    - `permissions: contents: read`;
+    - disparadores `push` a `main` y `pull_request`, nunca `pull_request_target`;
+    - `persist-credentials: false`, `concurrency`, `timeout-minutes` y runner `ubuntu-24.04` fijo.
+  - **Imágenes de Docker fijadas por digest** (`imagen:versión@sha256:…`, el del índice multiplataforma), con un comentario de la versión: `postgres`, `valkey`, la base de Python y la de uv del Dockerfile. Dependabot mantiene al día imágenes y acciones.
+  - **Suelo de cobertura del 95 %** en `pyproject.toml`, igual en local que en CI.
+  - **README de escaparate,** con el diagrama en Mermaid, el badge de CI y 2 capturas hechas por Toni, sin datos personales.
+  - **Release:** etiqueta anotada `v0.1.0` sobre `main` tras fusionar el PR, y release de GitHub con notas a mano. Sin `CHANGELOG.md` ni imagen en GHCR (hasta la Fase 9).
+  - **El repo pasa a público al publicar la v0.1.0,** después de escanear todo el historial con `gitleaks`.
+    - El historial se queda como está: a Toni no le importa que se vean su nombre y el email antiguo.
+    - Al pasar a público, Toni activa el escaneo de secretos con push protection y la protección de `main`, que exige el check verde.
 - Terminada cuando: check verde en GitHub y release **v0.1.0**. → **MVP completo.**
 
 ### Post-MVP
@@ -426,11 +445,11 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - cambio de httpx a httpx2;
   - ADR-001 a ADR-008.
 - **Pendiente de decidir:** interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
-- **Pendiente de hacer (Toni):** activar el escaneo de secretos con push protection en GitHub. El repo es privado y ahí GitHub no lo ofrece gratis (requiere Secret Protection, de pago): revisar los ajustes del repo o activarlo cuando el repo pase a público.
+- **Pendiente de hacer (Toni), al pasar el repo a público con la v0.1.0:** activar el escaneo de secretos con push protection y proteger `main` para exigir el check verde de CI. En un repo privado del plan Free, GitHub no ofrece ninguna de las dos (comprobado el 2026-10-28: `main` no está protegida).
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
 - **Siguiente paso:**
-  1. Commit de cierre de la Fase 5 (con el OK de Toni), primero de la rama `phase-6-ci-and-presentation`.
-  2. Plan de la Fase 6 (CI y presentación) y decisiones de Toni.
+  1. Construir la Fase 6 paso a paso (regla 16): workflow con `lint` → PR en borrador → `test` → `stack` → prueba del rojo → README → documentación.
+  2. Fusionar el PR; escaneo con `gitleaks`; release v0.1.0; repo público.
