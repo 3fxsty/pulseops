@@ -1,22 +1,30 @@
 """Monitor endpoints. HTTP only: validation and persistence live elsewhere."""
 
+from datetime import timedelta
 from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 
+from pulseops.api.cursors import InvalidCursorError, decode_cursor, encode_cursor
 from pulseops.api.deps import SessionDep, SettingsDep, require_api_key
-from pulseops.api.errors import monitor_not_found
+from pulseops.api.errors import invalid_cursor, monitor_not_found
 from pulseops.api.schemas import (
+    CheckPage,
+    CheckRead,
     MonitorCreate,
     MonitorPage,
     MonitorRead,
+    MonitorStats,
     MonitorUpdate,
+    Period,
     Problem,
 )
 from pulseops.db.models import Monitor
+from pulseops.repositories import checks as checks_repository
 from pulseops.repositories import monitors as repository
 from pulseops.security.validation import validate_monitor_url
+from pulseops.status import current_status
 
 PROBLEM = {"model": Problem, "content": {"application/problem+json": {}}}
 
@@ -26,6 +34,14 @@ router = APIRouter(
     dependencies=[Depends(require_api_key)],
     responses={401: PROBLEM, 422: PROBLEM},
 )
+
+# A closed list (never user-built SQL): windows ending now; nothing older
+# than 30 days exists anyway (retention).
+PERIODS: dict[str, timedelta] = {
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+}
 
 # The API calls it `id`; in the code it is always the public_id (ADR-019).
 PublicId = Annotated[UUID, Path(alias="id", description="Public monitor id.")]
@@ -123,3 +139,71 @@ async def update_monitor(
 )
 async def delete_monitor(monitor: MonitorDep, session: SessionDep) -> None:
     await repository.delete_monitor(session, monitor)
+
+
+@router.get(
+    "/{id}/checks",
+    responses={404: PROBLEM},
+    summary="List a monitor's checks, newest first",
+)
+async def list_monitor_checks(
+    monitor: MonitorDep,
+    session: SessionDep,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    cursor: Annotated[
+        str | None, Query(description="The `next_cursor` of the previous page.")
+    ] = None,
+) -> CheckPage:
+    try:
+        before = decode_cursor(cursor) if cursor is not None else None
+    except InvalidCursorError:
+        raise invalid_cursor() from None
+    # One extra row says whether there is a next page.
+    checks = await checks_repository.list_checks(
+        session, monitor_id=monitor.id, limit=limit + 1, before=before
+    )
+    page, more = checks[:limit], len(checks) > limit
+    return CheckPage(
+        items=[CheckRead.from_model(check) for check in page],
+        next_cursor=encode_cursor(page[-1].scheduled_at) if more else None,
+    )
+
+
+@router.get(
+    "/{id}/stats",
+    responses={404: PROBLEM},
+    summary="Current status, uptime and response times over a period",
+)
+async def get_monitor_stats(
+    monitor: MonitorDep,
+    session: SessionDep,
+    period: Period = "7d",
+) -> MonitorStats:
+    last = await checks_repository.latest_check(session, monitor.id)
+    stats = await checks_repository.check_stats(
+        session, monitor_id=monitor.id, period=PERIODS[period]
+    )
+    return MonitorStats(
+        status=current_status(
+            is_active=monitor.is_active,
+            interval_seconds=monitor.interval_seconds,
+            last_check_at=last.scheduled_at if last else None,
+            last_check_up=last.is_up if last else None,
+            now=stats.until,
+        ),
+        last_check=CheckRead.from_model(last) if last else None,
+        period=period,
+        since=stats.since,
+        to=stats.until,
+        # "No data" is neither 0 % nor 100 %.
+        uptime_percent=round(stats.up / stats.total * 100, 3) if stats.total else None,
+        avg_response_time_ms=_round_ms(stats.avg_response_time_ms),
+        p95_response_time_ms=_round_ms(stats.p95_response_time_ms),
+        checks_total=stats.total,
+        checks_up=stats.up,
+        checks_down=stats.total - stats.up,
+    )
+
+
+def _round_ms(value: float | None) -> float | None:
+    return None if value is None else round(value, 1)

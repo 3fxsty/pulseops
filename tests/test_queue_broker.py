@@ -11,6 +11,14 @@ import uuid
 import pytest
 from ardiq import Ardiq
 
+from pulseops.queue.app import (
+    CHECKS_LANE,
+    LANE_LIMITS,
+    MAINTENANCE_LANE,
+    SCHEDULER_LANE,
+    build_app,
+)
+
 pytestmark = pytest.mark.anyio
 
 
@@ -97,3 +105,49 @@ async def test_payload_carries_plain_integers(queue):
         await wait_for_runs(runs, 1)
 
     assert runs == [microseconds]
+
+
+async def test_scheduler_keeps_its_slot_while_checks_and_cleanup_are_busy(
+    test_broker_url,
+):
+    # The worker's real lane setup: checks and cleanup fill their lanes (and
+    # have more waiting), yet a scheduler tick still runs at once.
+    app = build_app(test_broker_url, f"pulseops_test_{uuid.uuid4()}")
+    release = asyncio.Event()
+    busy = {CHECKS_LANE: 0, MAINTENANCE_LANE: 0}
+    ticked = asyncio.Event()
+
+    @app.task(name="slow_check", priority=CHECKS_LANE)
+    async def slow_check(n: int) -> None:
+        busy[CHECKS_LANE] += 1
+        await release.wait()
+
+    @app.task(name="slow_cleanup", priority=MAINTENANCE_LANE)
+    async def slow_cleanup(n: int) -> None:
+        busy[MAINTENANCE_LANE] += 1
+        await release.wait()
+
+    @app.task(name="tick", priority=SCHEDULER_LANE)
+    async def tick() -> None:
+        ticked.set()
+
+    try:
+        for n in range(40):
+            await slow_check.enqueue(n)
+        for n in range(3):
+            await slow_cleanup.enqueue(n)
+
+        async with running(app):
+            async with asyncio.timeout(5):
+                while busy != LANE_LIMITS:
+                    await asyncio.sleep(0.05)
+            await asyncio.sleep(0.3)  # time to (wrongly) take more
+            assert busy == {CHECKS_LANE: 30, MAINTENANCE_LANE: 1}
+
+            await tick.enqueue()
+            async with asyncio.timeout(5):
+                await ticked.wait()
+            release.set()
+    finally:
+        release.set()
+        await app._core.purge()

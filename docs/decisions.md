@@ -936,7 +936,7 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 ## ADR-042 — Worker capacity and the database pool
 
 - **Date:** 2026-10-27 (Phase 4)
-- **Status:** Accepted
+- **Status:** Accepted; lanes amended by ADR-051 (a third `maintenance` lane, and `checks` limited to 30)
 
 **Decision.**
 - **`concurrency=32`:** checks wait on the network, not the CPU.
@@ -1016,5 +1016,161 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 **Weak point.**
 - A restart policy only covers a process that exits. A hung but alive worker is caught by the heartbeat, which needs Phase 7's alerting to be acted on.
 - The policy only helps after a reboot if the Docker daemon starts on its own.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-046 — Uptime is counted in checks; no data is not a number
+
+- **Date:** 2026-10-28 (Phase 5)
+- **Status:** Accepted
+
+**Context.** Uptime is the share of time a monitor was up. Checks are samples, and there are gaps when the worker is down (ADR-040).
+
+**Options.**
+1. **By number of checks:** checks up / checks in the period.
+2. **By time:** each check weighs the interval it covers.
+3. **By incidents:** total time minus the duration of each outage (Phase 7).
+
+**Decision.** Option 1.
+- **`uptime_percent`** = checks up / checks in the period × 100, rounded to 3 decimals.
+- **It is `null` when the period has no checks:** "no data" is neither 0 % nor 100 %.
+- **Gaps fall out on their own:** a period without checks simply contributes nothing (the Phase 5 rule decided in ADR-040).
+
+**Why.** While the interval does not change, every check covers the same time, so options 1 and 2 give exactly the same number. Option 2 needs the interval stored in every check, a schema change, for a difference that only appears when the interval changes inside the period.
+
+**Weak point.** If the interval changes inside the period, every check weighs the same although it covers a different time (a day at 5 min and a day at 30 s: the second weighs 10 times more).
+
+**Reversibility.** Easy. Moving to option 2 means adding `interval_seconds` to `checks`. Thanks to the 30-day retention, the whole history has it 30 days later, without backfilling.
+
+---
+
+## ADR-047 — A monitor's current status
+
+- **Date:** 2026-10-28 (Phase 5)
+- **Status:** Accepted
+
+**Decision.** `status`, derived from the latest check by a pure function (`pulseops/status.py`):
+
+| Status | When |
+|---|---|
+| `paused` | The monitor is inactive (wins over everything) |
+| `unknown` | No check yet, or the latest is older than 2 × interval + 60 s |
+| `up` / `down` | The latest check, when it is recent |
+
+**Why the staleness rule.** If the worker stops, the last check stays "up" forever. Reporting it as current would be a lie; past that threshold it is "no data". The 60 s margin covers the scheduler's 5 s tick and the check itself. The boundary is tested (180 s still fresh for a 60 s interval, 181 s stale).
+
+**Rejected.** Always returning the last outcome, however old: simpler, but wrong exactly when it matters (the worker is down).
+
+**Reversibility.** Easy: one function.
+
+---
+
+## ADR-048 — History and stats endpoints
+
+- **Date:** 2026-10-28 (Phase 5)
+- **Status:** Accepted
+
+**Decision.** Two routes under the monitor, with the API key, 404 `monitor_not_found` for an unknown monitor:
+
+| Route | Response |
+|---|---|
+| `GET /api/v1/monitors/{id}/checks?limit=50&cursor=…` | `items` (`scheduled_at`, `is_up`, `status_code`, `response_time_ms`, `error_kind`, `error_detail`), newest first, and `next_cursor` (`null` on the last page). `limit` 1–100 |
+| `GET /api/v1/monitors/{id}/stats?period=7d` | `status` and `last_check` (ADR-047); `period`, `from`, `to`; `uptime_percent` (ADR-046); `avg_response_time_ms` and `p95_response_time_ms` (ADR-049); `checks_total`, `checks_up`, `checks_down` |
+
+- **Periods:** a closed list, `24h`, `7d` (default) and `30d`, as windows ending at the database's `now()`. Anything else is a 422. Nothing older than 30 days exists anyway (retention).
+- **`error_detail` is returned:** it is the user's own data, behind the API key. It still never reaches the logs (ADR-044).
+- **The internal monitor id is never exposed:** items do not carry `monitor_id`.
+
+**Rejected.**
+- **Status inside `GET /monitors`:** one more query per monitor; to be revisited with a UI (Phase 8).
+- **A separate `/status` route:** another route for data already in `/stats`.
+- **Free `from`/`to` dates:** more validation for no current need. They can be added later without breaking anything.
+
+**Reversibility.** Hard: routes and response shapes are a public contract.
+
+---
+
+## ADR-049 — Latency statistics, computed on demand
+
+- **Date:** 2026-10-28 (Phase 5)
+- **Status:** Accepted
+
+**Decision.**
+- **Mean and 95th percentile, over the checks that were up only.**
+  - **Why only those:** timeouts have no time, and a 500 answered in 5 ms would flatter a broken site.
+  - **Why the p95:** it shows the spikes a mean hides, and PostgreSQL computes it in the same query (`percentile_cont(0.95) WITHIN GROUP … FILTER`).
+- **On demand:** one aggregate query over the primary key `(monitor_id, scheduled_at)`, no precomputed tables.
+- **Measured** (`scripts/measure_queries.py`, ADR-052; 10 monitors, 892,810 checks): `/stats` over 30 days (86,400 checks of one monitor) takes **~19-20 ms** (median of 20 runs), well under the 100 ms target. A history page takes ~1.7 ms.
+
+**Rejected.** Hourly rollups (a table or materialized view): very fast, but one more thing to keep in sync. To be revisited if the measurement degrades or there are many monitors.
+
+**Weak point.** The MVP only asked for the mean; the p95 is one more field to maintain.
+
+**Reversibility.** Easy for the computation; the field names are part of the contract (ADR-048).
+
+---
+
+## ADR-050 — Opaque history cursors
+
+- **Date:** 2026-10-28 (Phase 5)
+- **Status:** Accepted
+
+**Context.** ADR-015 decided keyset pagination over `(monitor_id, scheduled_at)`. With OFFSET, a check arriving while a client pages shifts every page by one.
+
+**Decision.**
+- **Format:** `base64url("v1:<scheduled_at in microseconds>")`, without padding. The query is `scheduled_at < cursor ORDER BY scheduled_at DESC LIMIT n+1`; the extra row tells whether there is a next page.
+- **Opaque:** clients only pass back the `next_cursor` they received. The version prefix lets the format change without breaking them.
+- **Strict decoding:** length, strict base64, `v1` prefix, ASCII digits only, at most 17 of them. Anything else is 422 `invalid_cursor`, and the cursor is never echoed. A well-formed cursor with another time is harmless: the monitor always comes from the URL, so it can only return an empty or a different page of that same monitor.
+- **Microseconds:** the cursor keeps the exact database value (`pulseops/timestamps.py`, shared with the queue payload).
+
+**Rejected.** A readable `before=<timestamp>` parameter: easy to debug, but it would become part of the contract.
+
+**Reversibility.** Hard for the parameter names; easy for the format (the version prefix).
+
+---
+
+## ADR-051 — Retention: hourly batch deletes on a dedicated lane
+
+- **Date:** 2026-10-28 (Phase 5)
+- **Status:** Accepted
+
+**Decision.**
+- **A cron every hour, `delete_expired_checks`,** deletes checks older than 30 days (`pulseops/retention.py`).
+- **Batches of 5,000**, each in its own short transaction, so locks stay short and what was deleted stays deleted.
+- **A 60 s budget per run:** no new batch starts after 60 s, and what is left goes in the next run. ArdiQ's `timeout` (90 s) is only a safety net that never cuts a batch in normal conditions.
+- **Its own lane, `maintenance`, limited to 1** (requested by the project owner). The lanes become `["checks", "maintenance", "scheduler"]`, and **`checks` drops from 31 to 30**, so checks (30) + cleanup (1) always leave at least one slot for the scheduler.
+  - **Verified against Valkey:** with `checks` at 31, the scheduler did not run while checks and cleanup were busy; with 30 it runs at once (`test_scheduler_keeps_its_slot_while_checks_and_cleanup_are_busy`).
+- **Delete by physical address (`ctid`), with the date checked again:** `DELETE … WHERE ctid = ANY(ARRAY(SELECT ctid … WHERE scheduled_at < cutoff LIMIT 5000)) AND scheduled_at < cutoff`.
+  - **Why `ctid`:** the first version joined on `(monitor_id, scheduled_at) IN (subquery)`. Depending on the statistics sample, PostgreSQL picked a hash join over a **full table scan**, 99 ms per batch, growing with the table. With `ctid` there is no join: a TID scan visits exactly those addresses. No sequential scan in 5 measured runs.
+  - **Why recheck the date** (requested by the project owner): selection and deletion are one statement, so an address cannot be reused in between. If one ever pointed at a recent check, nothing would be deleted. `test_an_address_reused_by_a_recent_check_is_never_deleted` simulates it.
+- **Index choice is left to PostgreSQL:**
+  - with a backlog, the selection uses the **BRIN index** on `scheduled_at`;
+  - for the hourly steady state, PostgreSQL 18 prefers the **primary key with a skip scan** (one index search per monitor): 0.7 ms with 10 monitors, 4.8 ms with 1,000.
+  - Either way the table is never scanned whole.
+
+**Rejected.**
+- **Partitioning `checks` by day** and dropping partitions: best at scale, much more complexity. Noted for when `checks` grows a lot.
+- **`pg_cron`:** not in the image, and it would put PulseOps logic inside the database.
+- **One huge DELETE:** long locks and bloat.
+
+**Weak point.** Switching from the skip scan to the BRIN index with many thousands of monitors is expected but not verified.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-052 — Evidence tooling for Phase 5
+
+- **Date:** 2026-10-28 (Phase 5)
+- **Status:** Accepted
+
+**Decision.**
+- **`scripts/measure_queries.py`:** seeds the test database with realistic checks (10 monitors × 31 days every 30 s by default, inserted in time order), runs `EXPLAIN ANALYZE` and 20 real runs of the history, stats and retention queries, and deletes everything it created. Options: `--plans`, `--monitors`, `--days`, `--interval`.
+  - **It measures the API's own SQL:** the repository builds its statements in separate functions (`history_statement`, `stats_statement`, `expired_batch_statement`).
+  - **`EXPLAIN` without string-built SQL:** done with SQLAlchemy's compiler extension, which keeps bound parameters. The DELETE's plan is rolled back.
+  - **`ANALYZE` needs the table owner,** so the script runs it as `pulseops_owner`; in production, autovacuum does it.
+- **The smoke test checks the worker too:** a new monitor must get its first automatic check within 20 s, then `/checks` and `/stats` are checked through the API. 29 checks in total.
 
 **Reversibility.** Easy.

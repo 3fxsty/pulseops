@@ -11,12 +11,13 @@ from urllib.parse import urlsplit
 import pytest
 from ardiq import Ardiq
 from ardiq.testing import inline
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pulseops.checker.outcome import up
 from pulseops.db.models import Check, Monitor
 from pulseops.queue import tasks
+from pulseops.timestamps import from_microseconds, to_microseconds
 from pulseops.worker import app
 
 pytestmark = pytest.mark.anyio
@@ -67,7 +68,7 @@ async def stored_slots(session, monitor_id):
 def test_microseconds_keep_the_exact_time():
     moment = datetime(2026, 10, 27, 22, 38, 14, 931815, tzinfo=UTC)
 
-    assert tasks.from_microseconds(tasks.to_microseconds(moment)) == moment
+    assert from_microseconds(to_microseconds(moment)) == moment
 
 
 async def test_check_task_stores_the_outcome(worker, session):
@@ -75,7 +76,7 @@ async def test_check_task_stores_the_outcome(worker, session):
     slot = datetime(2026, 1, 1, 12, 0, 0, 123456, tzinfo=UTC)
 
     async with inline(worker):
-        job = await tasks.check_monitor.enqueue(monitor.id, tasks.to_microseconds(slot))
+        job = await tasks.check_monitor.enqueue(monitor.id, to_microseconds(slot))
         assert (await job.result()).success
 
     assert await stored_slots(session, monitor.id) == [slot]
@@ -105,6 +106,26 @@ async def test_scheduler_tick_survives_a_broken_broker(worker, session, monkeypa
     # Nothing was lost: the monitor is still due for the same slot.
     await session.refresh(monitor)
     assert monitor.next_check_at <= await session.scalar(select(func.now()))
+
+
+async def test_retention_task_deletes_expired_checks(worker, session):
+    monitor = await add_monitor(session)
+    for days in (31, 1):
+        await session.execute(
+            insert(Check).values(
+                monitor_id=monitor.id,
+                scheduled_at=func.now() - timedelta(days=days),
+                is_up=True,
+                status_code=200,
+                response_time_ms=100,
+            )
+        )
+    await session.commit()
+
+    async with inline(worker):
+        assert await tasks.delete_expired() == 1
+
+    assert len(await stored_slots(session, monitor.id)) == 1  # the recent one
 
 
 async def test_scheduler_error_log_never_shows_the_broker_password(

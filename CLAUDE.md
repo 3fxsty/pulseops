@@ -112,7 +112,7 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
   - `expire_ms` descarta de verdad las tareas que no empiezan a tiempo;
   - `ardiq.testing.inline` ignora los retrasos y `expire_ms`;
   - no hay opción de timeout de conexión: un broker inalcanzable tarda unos 16 s en fallar.
-- **Hallazgos para el autor** (Toni abre las issues; se apuntan en `docs/evidence.md`, "Upstream issues"):
+- **Hallazgos para el autor**, abiertos por Toni como issues [#9](https://github.com/17tayyy/ardiq/issues/9), [#10](https://github.com/17tayyy/ardiq/issues/10) (los ejemplos de ArdiQ publican Redis en `0.0.0.0` sin contraseña) y [#11](https://github.com/17tayyy/ardiq/issues/11); apuntados en `docs/evidence.md`, "Upstream issues":
   - la guía de `task_id` no aclara que el deduplicado acaba al terminar la tarea;
   - en modo `burst`, un segundo `app.run()` sobre la misma instancia no procesa la cola. Reproducido con Redis 7.4.12 y Valkey 9.1.2.
 
@@ -157,6 +157,7 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
   - En el comprobador, la validación se hace **al abrir cada conexión TCP**, con la IP fijada (ADR-031): se resuelve, se validan todas las IPs y se conecta a una de esas mismas. El cliente HTTP usa `trust_env=False` (ignora `HTTP(S)_PROXY`) y no reutiliza conexiones.
   - Verificación SSL siempre activa.
   - El repositorio solo acepta `ValidatedUrl`, que únicamente crea el paso de validación. Así es imposible guardar por accidente una URL sin validar.
+- **Cursores del historial** (ADR-050): son opacos y se decodifican de forma estricta. Un cursor manipulado da 422 `invalid_cursor` sin devolverlo, y el monitor sale siempre de la URL, nunca del cursor.
 - **Errores de la API:**
   - Formato RFC 9457 + campo `code`.
   - Los 500 son siempre genéricos.
@@ -278,8 +279,20 @@ Lanzar los checks según el intervalo de cada monitor y guardar resultados.
 Endpoints de estado actual, uptime y latencia media; limpieza automática de datos de más de 30 días.
 - Ya decidido: el historial de checks se pagina **por cursor** sobre `(monitor_id, scheduled_at)`, no con offset.
 - Ya decidido: los huecos sin checks (por ejemplo, con el worker parado) cuentan como **"sin datos"**, ni arriba ni caída.
-- Pendiente de la Fase 4: ampliar `scripts/smoke_test.py` para que compruebe que un monitor nuevo recibe checks. Se hará por la API cuando exista el endpoint de historial; hasta entonces se mira con `psql`.
-- A decidir: cálculo del uptime (por número de checks o por tiempo).
+- Decidido (ADR-046 a ADR-052):
+  - **Uptime por número de checks:** `checks arriba / checks con datos × 100`, con 3 decimales y `null` si no hay datos. Si un día se quiere "por tiempo", habrá que guardar el intervalo en cada check; con la retención de 30 días, el historial se completa solo en un mes.
+  - **Estado actual:** `up` / `down` según el último check; `paused` si está desactivado; `unknown` si no hay checks o el último tiene más de 2 × intervalo + 60 s.
+  - **Rutas:** `GET /api/v1/monitors/{id}/checks?limit=&cursor=` y `GET /api/v1/monitors/{id}/stats?period=24h|7d|30d` (por defecto `7d`). El historial incluye el `error_detail`.
+  - **Latencia:** media y p95, solo de los checks que salieron arriba.
+  - **Cálculo al vuelo** sobre la PK, medido con 86 400 filas (objetivo: menos de 100 ms para `30d`).
+  - **Cursor opaco:** `base64url` de `v1:<µs>`; si está manipulado, 422 `invalid_cursor`.
+  - **Retención:**
+    - un cron cada hora, en su propio carril `maintenance` (límite 1);
+    - borra por lotes de 5 000, como máximo 60 s por pasada, y lo que quede se borra en la siguiente;
+    - `checks` baja a un límite de 30, para que el planificador conserve siempre su hueco;
+    - borra por `ctid` y vuelve a comprobar la fecha en el propio `DELETE`. Nunca recorre la tabla entera; PostgreSQL elige entre el BRIN y la PK.
+  - **Smoke test:** se amplía con `/checks` y `/stats`, todo por la API (29 casos).
+  - **Medición:** `scripts/measure_queries.py`.
 - Terminada cuando: se puede consultar cómo ha ido una web en la última semana.
 
 **Fase 6 — CI y presentación**
@@ -318,7 +331,30 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** Fase 4 — Checks automáticos (ArdiQ), **construida** en la rama `phase-4-automatic-checks`. Falta que Toni la pruebe y el PR. Fase 3 cerrada (PR #4 fusionado el 2026-10-27).
+- **Fase actual:** Fase 5 — Estado y estadísticas, **construida y verificada por Toni** (2026-10-28) en la rama `phase-5-status-and-stats`. Falta el PR. Fase 4 cerrada (PR #5 fusionado el 2026-10-27, verificada por Toni).
+- **Hecho en Fase 5:**
+  - `GET /api/v1/monitors/{id}/checks` (historial con cursor opaco) y `GET /api/v1/monitors/{id}/stats` (estado actual, uptime, media y p95, recuentos);
+  - `pulseops/status.py`, `pulseops/timestamps.py` y `api/cursors.py`;
+  - la retención (`pulseops/retention.py`): un cron cada hora en el carril `maintenance`, por lotes y por `ctid`, con un tope de 60 s;
+  - `build_app` en `queue/app.py`;
+  - `scripts/measure_queries.py`;
+  - el smoke test con 29 casos;
+  - 266 tests (cobertura del 97 %);
+  - ADR-046 a ADR-052.
+- **Cambios descubiertos en Fase 5 (durante la construcción):**
+  - **Medición** (`scripts/measure_queries.py`, 10 monitores, 892 810 checks): `/stats` de 30 días tarda unos 20 ms y el historial unos 1,7 ms por página, así que calcular al vuelo basta.
+  - **El borrado por lotes no era estable con `(monitor_id, scheduled_at) IN (subconsulta)`.**
+    - Según la muestra de estadísticas, PostgreSQL elegía un *hash join* con `Seq Scan` de la tabla entera: 99 ms por lote, y crecería con la tabla.
+    - **Ahora se borra por `ctid`** (la dirección física de la fila): `ctid = ANY(ARRAY(SELECT ctid … LIMIT 5000)) AND scheduled_at < corte` y un `Tid Scan`, sin cruce.
+    - **La fecha se vuelve a comprobar en el propio `DELETE`** (condición de Toni): si una dirección apuntara a un check reciente, no se borra. La selección y el borrado van en la misma sentencia; hay un test que lo simula.
+    - En 5 ejecuciones, ningún `Seq Scan`.
+  - **Qué índice usa el borrado:**
+    - con atraso usa el BRIN;
+    - en el borrado normal de cada hora, PostgreSQL 18 elige la PK con *skip scan* (una búsqueda por monitor): 0,7 ms con 10 monitores y 4,8 ms con 1 000;
+    - el paso al BRIN con muchos más monitores no está verificado. Se deja elegir al planificador.
+  - **El carril `maintenance` exigía bajar `checks` a 30.** Con `checks` en 31 y la limpieza ocupando 1, el planificador no se ejecutaba (comprobado contra Valkey real).
+  - **`pulseops/timestamps.py`:** las funciones de microsegundos salen de `queue/tasks.py`, porque si la API importara ese módulo se crearía la app de ArdiQ, que necesita `BROKER_URL`, y la API ya no la tiene.
+  - **Solo el dueño de una tabla puede ejecutar `ANALYZE`:** el script lo hace como `pulseops_owner`. En producción lo hace el autovacuum.
 - **Hecho en Fase 4:**
   - el worker (`ardiq run pulseops.worker:app`) con un planificador cada 5 s y la tarea `check_monitor`;
   - migraciones `0002` (`next_check_at`) y `0003` (`scheduler_heartbeat`);
@@ -390,16 +426,11 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - ADR-001 a ADR-008.
 - **Pendiente de decidir:** interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
 - **Pendiente de hacer (Toni):** activar el escaneo de secretos con push protection en GitHub. El repo es privado y ahí GitHub no lo ofrece gratis (requiere Secret Protection, de pago): revisar los ajustes del repo o activarlo cuando el repo pase a público.
-- **Pendiente de hacer (Toni):** abrir las issues de ArdiQ (`task_id` y el segundo `run()` en modo burst). Después, apuntar los enlaces en `docs/evidence.md`, "Upstream issues".
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:** que Toni pruebe la Fase 4 con la verificación del plan:
-  1. crear un monitor y ver sus checks con `psql` como `pulseops_app`;
-  2. un 404;
-  3. pausarlo;
-  4. `docker compose restart worker valkey` sin duplicados;
-  5. `ardiq status`.
-
-  Después, el PR a `main`, con su OK.
+- **Siguiente paso:**
+  1. Abrir el PR de la Fase 5 con el OK de Toni y que lo fusione.
+  2. Después, cerrar la Fase 5 en `docs/evidence.md` y aquí.
+  3. Empezar la Fase 6 (CI y presentación) en modo plan.

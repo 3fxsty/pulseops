@@ -18,7 +18,7 @@ Compose refuses to start without the secrets in `.env`, and the API refuses to s
 | Service | Role | Exposed on |
 |---|---|---|
 | `api` | FastAPI: manage monitors | `127.0.0.1:8000` |
-| `worker` | ArdiQ: schedules and runs the checks | — |
+| `worker` | ArdiQ: schedules and runs the checks, deletes old history | — |
 | `postgres` | Monitors and check history | `127.0.0.1:5432` (for tests) |
 | `valkey` | ArdiQ's queue | `127.0.0.1:6380` (for tests) |
 | `migrate` | Applies migrations once, then exits | — |
@@ -39,6 +39,19 @@ Every `/api/v1` endpoint requires the `X-API-Key` header.
 | GET | `/api/v1/monitors/{id}` | Get a monitor |
 | PATCH | `/api/v1/monitors/{id}` | Change only the fields sent (e.g. `{"is_active": false}` to pause) |
 | DELETE | `/api/v1/monitors/{id}` | Delete a monitor and its check history |
+| GET | `/api/v1/monitors/{id}/checks?limit=50&cursor=…` | Check history, newest first. Pass `next_cursor` as `cursor` for the next page |
+| GET | `/api/v1/monitors/{id}/stats?period=7d` | Current status, uptime and response times over `24h`, `7d` or `30d` |
+
+### Status and statistics
+
+`/stats` answers "how has this site been doing?":
+
+- **`status`:** `up` or `down` from the latest check; `paused` if the monitor is inactive; `unknown` if there is no check yet or the latest is older than 2 intervals + 60 s (the worker may be stopped).
+- **`uptime_percent`:** checks up / checks in the period × 100 (3 decimals). It is `null` when the period has no checks: no data is neither 0 % nor 100 %.
+- **`avg_response_time_ms` and `p95_response_time_ms`:** over the checks that were up.
+- **Counts:** `checks_total`, `checks_up` and `checks_down`.
+
+The history is paginated with an opaque cursor, so pages never shift when new checks arrive. A cursor that was not issued by the API gets a 422 `invalid_cursor`.
 
 URLs are stored normalized. They are refused when they embed credentials or point to private, internal or reserved addresses (SSRF protection; set `ALLOW_PRIVATE_TARGETS=true` for installs that must check a private network).
 
@@ -49,7 +62,7 @@ Errors use [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) Problem Details (`
 | 401 | `unauthorized` |
 | 404 | `monitor_not_found`, `not_found` |
 | 409 | `monitor_url_conflict` |
-| 422 | `validation_error`, `url_credentials_not_allowed`, `url_target_not_allowed` |
+| 422 | `validation_error`, `url_credentials_not_allowed`, `url_target_not_allowed`, `invalid_cursor` |
 | 500 | `internal_error` |
 
 ## Database
@@ -98,8 +111,9 @@ With the stack running (`docker compose up -d`):
 # Check one URL exactly as PulseOps will (prints JSON; exit 0 = up, 1 = down)
 docker compose exec api python -m pulseops.checker https://www.google.com
 
-# Smoke test: the manual test list against the live API (needs internet access).
-# It only touches the monitors it creates, and deletes them afterwards.
+# Smoke test: the manual test list against the live API, worker included
+# (needs internet access). It only touches the monitors it creates, and
+# deletes them afterwards.
 uv run python scripts/smoke_test.py
 ```
 
@@ -119,6 +133,9 @@ The `worker` service runs the scheduler and the checks (ArdiQ on Valkey):
    - A re-delivered check is stored only once.
 3. **A new monitor is checked within a few seconds.** Changing its URL or interval, or reactivating it, brings its next check forward to now. Pausing or deleting it stops its checks.
 4. **Every successful scheduler tick stamps `scheduler_heartbeat`**, even when nothing is due, so a stalled scheduler can be detected.
+5. **Every hour, checks older than 30 days are deleted** in batches of 5,000, for at most 60 s per run (the rest goes in the next run).
+   - It runs on its own `maintenance` lane, so a long cleanup never delays the scheduler.
+   - Each batch deletes by physical row address, so it never scans the whole table.
 
 The worker's logs show one line per check with the monitor's public id, up/down, the error kind and the response time. They never show the URL, which may carry tokens:
 
@@ -126,14 +143,9 @@ The worker's logs show one line per check with the monitor's public id, up/down,
 docker compose logs -f worker
 ```
 
-Until the history endpoints arrive (Phase 5), look at the checks with `psql`, as the app role:
+The checks are served by the API (`/checks` and `/stats`, see above). For a direct look, use `psql` as the app role:
 
 ```bash
-docker compose exec postgres sh -c 'psql "postgresql://pulseops_app:$PULSEOPS_APP_PASSWORD@127.0.0.1/pulseops" -c "
-  SELECT m.name, c.scheduled_at, c.is_up, c.status_code, c.response_time_ms, c.error_kind
-  FROM checks c JOIN monitors m ON m.id = c.monitor_id
-  ORDER BY c.scheduled_at DESC LIMIT 20"'
-
 # When the scheduler last completed a tick
 docker compose exec postgres sh -c 'psql "postgresql://pulseops_app:$PULSEOPS_APP_PASSWORD@127.0.0.1/pulseops" -c "
   SELECT last_success_at, now() - last_success_at AS age FROM scheduler_heartbeat"'
@@ -141,3 +153,15 @@ docker compose exec postgres sh -c 'psql "postgresql://pulseops_app:$PULSEOPS_AP
 # The queue: crons, lanes, workers
 docker compose exec worker ardiq status pulseops.worker:app
 ```
+
+## Performance
+
+`scripts/measure_queries.py` seeds the test database with realistic history (10 monitors × 31 days every 30 s, ~893,000 checks), times the history, stats and retention queries, prints their plans, and deletes everything it created:
+
+```bash
+uv run python scripts/measure_queries.py            # summary
+uv run python scripts/measure_queries.py --plans    # with full EXPLAIN ANALYZE plans
+uv run python scripts/measure_queries.py --monitors 1000 --interval 3600   # other shapes
+```
+
+Measured results are recorded in [`docs/evidence.md`](docs/evidence.md).
