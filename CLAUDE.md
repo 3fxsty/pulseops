@@ -112,7 +112,7 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
   - `expire_ms` descarta de verdad las tareas que no empiezan a tiempo;
   - `ardiq.testing.inline` ignora los retrasos y `expire_ms`;
   - no hay opción de timeout de conexión: un broker inalcanzable tarda unos 16 s en fallar.
-- **Hallazgos para el autor** (Toni abre las issues; se apuntan en `docs/evidence.md`, "Upstream issues"):
+- **Hallazgos para el autor**, abiertos por Toni como issues [#9](https://github.com/17tayyy/ardiq/issues/9), [#10](https://github.com/17tayyy/ardiq/issues/10) (los ejemplos de ArdiQ publican Redis en `0.0.0.0` sin contraseña) y [#11](https://github.com/17tayyy/ardiq/issues/11); apuntados en `docs/evidence.md`, "Upstream issues":
   - la guía de `task_id` no aclara que el deduplicado acaba al terminar la tarea;
   - en modo `burst`, un segundo `app.run()` sobre la misma instancia no procesa la cola. Reproducido con Redis 7.4.12 y Valkey 9.1.2.
 
@@ -318,7 +318,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** Fase 4 — Checks automáticos (ArdiQ), **construida** en la rama `phase-4-automatic-checks`. Falta que Toni la pruebe y el PR. Fase 3 cerrada (PR #4 fusionado el 2026-10-27).
+- **Fase actual:** Fase 5 — Estado y estadísticas, **no empezada**: falta el modo plan. Rama `phase-5-status-and-stats` creada desde `main`. Fase 4 cerrada (PR #5 fusionado el 2026-10-27, verificada por Toni).
 - **Hecho en Fase 4:**
   - el worker (`ardiq run pulseops.worker:app`) con un planificador cada 5 s y la tarea `check_monitor`;
   - migraciones `0002` (`next_check_at`) y `0003` (`scheduler_heartbeat`);
@@ -390,16 +390,8 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - ADR-001 a ADR-008.
 - **Pendiente de decidir:** interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
 - **Pendiente de hacer (Toni):** activar el escaneo de secretos con push protection en GitHub. El repo es privado y ahí GitHub no lo ofrece gratis (requiere Secret Protection, de pago): revisar los ajustes del repo o activarlo cuando el repo pase a público.
-- **Pendiente de hacer (Toni):** abrir las issues de ArdiQ (`task_id` y el segundo `run()` en modo burst). Después, apuntar los enlaces en `docs/evidence.md`, "Upstream issues".
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:** que Toni pruebe la Fase 4 con la verificación del plan:
-  1. crear un monitor y ver sus checks con `psql` como `pulseops_app`;
-  2. un 404;
-  3. pausarlo;
-  4. `docker compose restart worker valkey` sin duplicados;
-  5. `ardiq status`.
-
-  Después, el PR a `main`, con su OK.
+- **Siguiente paso:** la Fase 5 en modo plan (regla 8). Los cambios de cierre de la Fase 4 en este archivo y en `docs/evidence.md` van en el primer commit de la rama, con el OK de Toni.

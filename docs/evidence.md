@@ -14,7 +14,7 @@ Updated at the close of every phase (and whenever a verified fact changes). It c
 | 1 — Data model | PR #2, 2026-10-26 | 29 passed | clean (with `S` rules) | 16 | Clean-volume start, `\d checks`, downgrade/upgrade, `alembic check` |
 | 2 — Monitors API | PR #3, 2026-10-27 | 143 passed | clean (with `S` rules) | 30 | Manual test list: 22/22 against the live stack |
 | 3 — Checker | PR #4, 2026-10-27 | 170 passed, 95 % coverage | clean (with `S` rules) | 38 | Checker inside the container against real sites; smoke test 22/22 |
-| 4 — Automatic checks | PR pending | 213 passed, 97 % coverage | clean (with `S` rules) | 45 | Worker in Compose: a new monitor gets its first check in 2 s, then one per interval; worker restarted after `kill -9`; heartbeat fresh |
+| 4 — Automatic checks | PR #5, 2026-10-27 | 213 passed, 97 % coverage | clean (with `S` rules) | 45 | Worker in Compose: a new monitor gets its first check in 2 s, then one per interval; worker restarted after `kill -9`; heartbeat fresh |
 
 Reproduce the current numbers:
 
@@ -165,11 +165,11 @@ Not covered, on purpose: the real database session factory (tests substitute the
 
 | Metric | Value | Command |
 |---|---|---|
-| Commits on `main` | 41 (before Phase 4 is merged) | `git rev-list --count main` |
-| Non-blank lines in `src/` | 1394 (Phase 4 branch; 1055 after Phase 3) | `find src -name '*.py' \| xargs cat \| grep -cv '^\s*$'` |
-| Non-blank lines in `tests/` | 1610 (Phase 4 branch; 1052 after Phase 3) | same, on `tests` |
+| Commits on `main` | 51 | `git rev-list --count main` |
+| Non-blank lines in `src/` | 1394 (after Phase 4; 1055 after Phase 3) | `find src -name '*.py' \| xargs cat \| grep -cv '^\s*$'` |
+| Non-blank lines in `tests/` | 1610 (after Phase 4; 1052 after Phase 3) | same, on `tests` |
 | ADRs | 45 | `grep -c "^## ADR-" docs/decisions.md` |
-| Merged PRs | 4 | `gh pr list --state merged` |
+| Merged PRs | 5 | `gh pr list --state merged` |
 
 ## Upstream issues
 
@@ -177,3 +177,6 @@ Problems found in libraries, reported by the project owner. Each row is added on
 
 | Library | Issue | Status |
 |---|---|---|
+| ArdiQ | [#9](https://github.com/17tayyy/ardiq/issues/9) — Docs: custom `task_id` deduplication only lasts while the task exists | Open (2026-10-28) |
+| ArdiQ | [#10](https://github.com/17tayyy/ardiq/issues/10) — Security: examples publish Redis on all interfaces (0.0.0.0) without a password | Open (2026-10-28) |
+| ArdiQ | [#11](https://github.com/17tayyy/ardiq/issues/11) — A second `app.run()` in burst mode on the same instance exits without processing the queue | Open (2026-10-28) |
