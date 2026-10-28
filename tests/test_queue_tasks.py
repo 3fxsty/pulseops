@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from pulseops.checker.outcome import up
 from pulseops.db.models import Check, Monitor
 from pulseops.queue import tasks
+from pulseops.timestamps import from_microseconds, to_microseconds
 from pulseops.worker import app
 
 pytestmark = pytest.mark.anyio
@@ -67,7 +68,7 @@ async def stored_slots(session, monitor_id):
 def test_microseconds_keep_the_exact_time():
     moment = datetime(2026, 10, 27, 22, 38, 14, 931815, tzinfo=UTC)
 
-    assert tasks.from_microseconds(tasks.to_microseconds(moment)) == moment
+    assert from_microseconds(to_microseconds(moment)) == moment
 
 
 async def test_check_task_stores_the_outcome(worker, session):
@@ -75,7 +76,7 @@ async def test_check_task_stores_the_outcome(worker, session):
     slot = datetime(2026, 1, 1, 12, 0, 0, 123456, tzinfo=UTC)
 
     async with inline(worker):
-        job = await tasks.check_monitor.enqueue(monitor.id, tasks.to_microseconds(slot))
+        job = await tasks.check_monitor.enqueue(monitor.id, to_microseconds(slot))
         assert (await job.result()).success
 
     assert await stored_slots(session, monitor.id) == [slot]

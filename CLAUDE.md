@@ -279,7 +279,19 @@ Endpoints de estado actual, uptime y latencia media; limpieza automática de dat
 - Ya decidido: el historial de checks se pagina **por cursor** sobre `(monitor_id, scheduled_at)`, no con offset.
 - Ya decidido: los huecos sin checks (por ejemplo, con el worker parado) cuentan como **"sin datos"**, ni arriba ni caída.
 - Pendiente de la Fase 4: ampliar `scripts/smoke_test.py` para que compruebe que un monitor nuevo recibe checks. Se hará por la API cuando exista el endpoint de historial; hasta entonces se mira con `psql`.
-- A decidir: cálculo del uptime (por número de checks o por tiempo).
+- Decidido en el plan (los ADR se escriben al construir):
+  - **Uptime por número de checks:** `checks arriba / checks con datos × 100`, con 3 decimales y `null` si no hay datos. Si un día se quiere "por tiempo", habrá que guardar el intervalo en cada check; con la retención de 30 días, el historial se completa solo en un mes.
+  - **Estado actual:** `up` / `down` según el último check; `paused` si está desactivado; `unknown` si no hay checks o el último tiene más de 2 × intervalo + 60 s.
+  - **Rutas:** `GET /api/v1/monitors/{id}/checks?limit=&cursor=` y `GET /api/v1/monitors/{id}/stats?period=24h|7d|30d` (por defecto `7d`). El historial incluye el `error_detail`.
+  - **Latencia:** media y p95, solo de los checks que salieron arriba.
+  - **Cálculo al vuelo** sobre la PK, medido con 86 400 filas (objetivo: menos de 100 ms para `30d`).
+  - **Cursor opaco:** `base64url` de `v1:<µs>`; si está manipulado, 422 `invalid_cursor`.
+  - **Retención:**
+    - un cron cada hora, en su propio carril `maintenance` (límite 1);
+    - borra por lotes de 5 000, como máximo 60 s por pasada, y lo que quede se borra en la siguiente;
+    - `checks` baja a un límite de 30, para que el planificador conserve siempre su hueco;
+    - comprobar con `EXPLAIN` que el borrado usa el índice BRIN.
+  - **Smoke test:** se amplía con `/checks` y `/stats`, todo por la API.
 - Terminada cuando: se puede consultar cómo ha ido una web en la última semana.
 
 **Fase 6 — CI y presentación**
@@ -318,7 +330,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** Fase 5 — Estado y estadísticas, **no empezada**: falta el modo plan. Rama `phase-5-status-and-stats` creada desde `main`. Fase 4 cerrada (PR #5 fusionado el 2026-10-27, verificada por Toni).
+- **Fase actual:** Fase 5 — Estado y estadísticas, **en construcción**. El plan está aprobado y las decisiones están en el roadmap. Rama `phase-5-status-and-stats` creada desde `main`. Fase 4 cerrada (PR #5 fusionado el 2026-10-27, verificada por Toni).
 - **Hecho en Fase 4:**
   - el worker (`ardiq run pulseops.worker:app`) con un planificador cada 5 s y la tarea `check_monitor`;
   - migraciones `0002` (`next_check_at`) y `0003` (`scheduler_heartbeat`);
@@ -394,4 +406,11 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:** la Fase 5 en modo plan (regla 8). Los cambios de cierre de la Fase 4 en este archivo y en `docs/evidence.md` van en el primer commit de la rama, con el OK de Toni.
+- **Siguiente paso:** construir la Fase 5 en el orden del plan:
+  1. el repositorio;
+  2. el cursor;
+  3. las rutas `/checks` y `/stats`;
+  4. la retención (carril `maintenance`);
+  5. la medición de rendimiento;
+  6. el smoke test;
+  7. la documentación.

@@ -2,7 +2,6 @@
 
 import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
 
 from pulseops.checker import Checker
 from pulseops.config import get_settings
@@ -10,24 +9,13 @@ from pulseops.db.session import get_engine, get_sessionmaker
 from pulseops.queue.app import CHECKS_LANE, SCHEDULER_LANE, app
 from pulseops.repositories.scheduling import DueCheck
 from pulseops.scheduling import run_check, schedule_due_checks
+from pulseops.timestamps import from_microseconds, to_microseconds
 
 logger = logging.getLogger(__name__)
 
 SCHEDULER_EVERY_SECONDS = 5
 # Safety net above the checker's own 10 s deadline.
 CHECK_TASK_TIMEOUT_SECONDS = 30
-EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
-MICROSECOND = timedelta(microseconds=1)
-
-
-def to_microseconds(moment: datetime) -> int:
-    # msgpack cannot carry datetimes; microseconds keep the exact database
-    # value, so a re-delivered check lands on the same primary key.
-    return (moment - EPOCH) // MICROSECOND
-
-
-def from_microseconds(value: int) -> datetime:
-    return EPOCH + value * MICROSECOND
 
 
 @app.lifespan
@@ -53,7 +41,8 @@ async def resources():
     timeout=CHECK_TASK_TIMEOUT_SECONDS,
 )
 async def check_monitor(monitor_id: int, scheduled_at_us: int) -> None:
-    # Only ids travel through the queue, never the URL.
+    # Only ids travel through the queue, never the URL. msgpack cannot carry
+    # datetimes, hence microseconds (exact, so a re-delivery hits the same key).
     await run_check(
         app.state.sessions,
         app.state.checker,

@@ -2,12 +2,13 @@
 client can never set server-owned fields, and never sees the internal id."""
 
 from datetime import datetime
-from typing import Self
+from typing import Literal, Self
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from pulseops.db.models import Monitor
+from pulseops.db.models import Check, Monitor
+from pulseops.status import Status
 
 NAME_MAX_LENGTH = 100
 # Raw input bound, equal to Pydantic HttpUrl's own limit so an overlong URL
@@ -86,6 +87,68 @@ class MonitorPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+ErrorKind = Literal[
+    "timeout",
+    "dns_error",
+    "connection_error",
+    "ssl_error",
+    "http_error",
+    "blocked_target",
+]
+Period = Literal["24h", "7d", "30d"]
+
+
+class CheckRead(BaseModel):
+    scheduled_at: datetime = Field(description="When the check was due.")
+    is_up: bool
+    status_code: int | None
+    response_time_ms: int | None
+    error_kind: ErrorKind | None
+    error_detail: str | None
+
+    @classmethod
+    def from_model(cls, check: Check) -> Self:
+        return cls(
+            scheduled_at=check.scheduled_at,
+            is_up=check.is_up,
+            status_code=check.status_code,
+            response_time_ms=check.response_time_ms,
+            error_kind=check.error_kind,
+            error_detail=check.error_detail,
+        )
+
+
+class CheckPage(BaseModel):
+    items: list[CheckRead]
+    next_cursor: str | None = Field(
+        description="Pass it as `cursor` to get the next page; null on the last one."
+    )
+
+
+class MonitorStats(BaseModel):
+    status: Status = Field(
+        description="From the latest check; `unknown` if there is none or it is "
+        "older than 2 intervals + 60 s, `paused` if the monitor is inactive."
+    )
+    last_check: CheckRead | None
+    period: Period
+    # `from` is a Python keyword: the field is renamed only on the wire.
+    since: datetime = Field(serialization_alias="from")
+    to: datetime
+    uptime_percent: float | None = Field(
+        description="Checks up / checks in the period x 100. Null without data."
+    )
+    avg_response_time_ms: float | None = Field(
+        description="Mean over the checks that were up."
+    )
+    p95_response_time_ms: float | None = Field(
+        description="95th percentile over the checks that were up."
+    )
+    checks_total: int
+    checks_up: int
+    checks_down: int
 
 
 class ValidationErrorItem(BaseModel):

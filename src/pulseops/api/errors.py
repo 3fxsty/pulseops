@@ -57,6 +57,16 @@ def monitor_not_found() -> ApiProblem:
     )
 
 
+def invalid_cursor() -> ApiProblem:
+    # Never echoes the cursor that was sent.
+    return ApiProblem(
+        422,
+        "invalid_cursor",
+        "Invalid cursor",
+        "Use the next_cursor of a previous page, or no cursor for the first one.",
+    )
+
+
 def problem_response(problem: ApiProblem) -> JSONResponse:
     body = {
         # A relative reference under our own namespace, derived from the code.
