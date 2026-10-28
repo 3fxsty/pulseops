@@ -1257,6 +1257,9 @@ The roles and databases are created by an init script in `docker-entrypoint-init
   - `concurrency`: a new push to a PR cancels its previous run; runs on `main` always finish;
   - `timeout-minutes` on every job, and the runner pinned to `ubuntu-24.04`, not `ubuntu-latest`.
 - **Checked with `actionlint`** (1.7.7, run in Docker) before each push.
+- **Added at the close of Phase 6** (requested by the project owner, after Dependabot's first pull requests):
+  - **Python minor and major updates are ignored** in the `docker` ecosystem. Moving to a new Python version is a decision (ADR-004) that also changes `.python-version` and `requires-python`. Patch updates still come through. Dependabot had proposed `3.15.0-slim` (PR #10, closed); CI had already stopped it, since the image no longer built.
+  - **uv's version has one source, the Dockerfile.** Every CI job reads it from the `FROM …uv:<version>@sha256:…` line and passes it to `setup-uv`, and fails if the line is missing. When Dependabot bumps uv in the Dockerfile, CI follows, so the image and CI never run different versions of uv. The first bump, to 0.13.6 (PR #9), was applied this way.
 
 **Weak point.** Pins are less readable, and Dependabot opens more pull requests.
 
@@ -1317,6 +1320,9 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 - **The repository goes public with v0.1.0,** after a scan of the whole git history with `gitleaks`.
   - **Then, by the project owner:** secret scanning with push protection, and a protected `main` that requires the CI checks. A private repository on the Free plan gets neither (verified: `main` is not protected today).
   - **The git history stays as it is:** older commits show the owner's name and a previous email, which the owner accepts. New commits use the GitHub noreply address.
+- **Done on 2026-10-28:**
+  - **`gitleaks` 8.30.1** on a mirror of the GitHub repository (every branch and pull request ref): one finding, a false positive (the tests' made-up API key). It is listed in `.gitleaksignore` after review, so a new scan reports no leaks.
+  - **Tag `v0.1.0`** on the merge commit of PR #7, and the GitHub release "v0.1.0 — MVP".
 
 **Rejected.**
 - **A `CHANGELOG.md` as well:** the same content in two places for a single version.
