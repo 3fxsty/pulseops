@@ -16,7 +16,7 @@ Updated at the close of every phase (and whenever a verified fact changes). It c
 | 3 — Checker | PR #4, 2026-10-27 | 170 passed, 95 % coverage | clean (with `S` rules) | 38 | Checker inside the container against real sites; smoke test 22/22 |
 | 4 — Automatic checks | PR #5, 2026-10-27 | 213 passed, 97 % coverage | clean (with `S` rules) | 45 | Worker in Compose: a new monitor gets its first check in 2 s, then one per interval; worker restarted after `kill -9`; heartbeat fresh |
 | 5 — Status and statistics | PR #6, 2026-10-28 | 266 passed, 97 % coverage | clean (with `S` rules) | 52 | Smoke test 29/29 (first automatic check in 5 s); query measurement on ~893,000 checks |
-| 6 — CI and presentation | PR pending | 267 passed, 97 % coverage | clean (with `S` rules) | 58 | CI green on GitHub (lint, tests, full stack with smoke test); red check seen; failure logs reviewed; Dockerfile built locally from pinned digests |
+| 6 — CI and presentation | PR #7, 2026-10-28 | 267 passed, 97 % coverage | clean (with `S` rules) | 58 | CI green on GitHub (lint, tests, full stack with smoke test), also on `main` after the merge; red check seen; failure logs reviewed; Dockerfile built locally from pinned digests; `gitleaks` clean; **release v0.1.0 (MVP)** |
 
 Reproduce the current numbers:
 
@@ -139,6 +139,10 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | 2026-10-28 | Dockerfile built locally with the pinned digests; stack recreated | `FROM` lines resolved to the digests; PostgreSQL 18.6, Valkey 9.1.3, Python 3.13.18; 267 passed; smoke test 29/29 |
 | 2026-10-28 | PostgreSQL's log after the test suite and the smoke test, with `log_error_verbosity=terse` | 6 duplicate-key and 9 CHECK errors logged, **0 `DETAIL` lines, 0 lines with a URL** (before the change: 50 and 24 lines carrying URLs) |
 | 2026-10-28 | README screenshots (`docs/images/`) | Only PNG image chunks (`IHDR`, `IDAT`, `gAMA`, `pHYs`, `sRGB`): no text or EXIF metadata. No API key, browser bar or user name in view |
+| 2026-10-28 | `gitleaks` 8.30.1 on a mirror clone of the GitHub repository (all branches and every pull request's refs, the closed #8 included) | 66 commits scanned (75 minus 9 merges), ~724 KB. **1 finding, a false positive:** `TEST_API_KEY` in `tests/conftest.py`, the tests' made-up key; compared without printing it, it is not the real API key. With `.gitleaksignore`: no leaks found, from the mirror and from the repository root |
+| 2026-10-28 | README on GitHub, checked by the project owner | The Mermaid architecture diagram renders correctly |
+| 2026-10-28 | Release v0.1.0 | Annotated tag `v0.1.0` on the merge commit of PR #7 (`8a6e517`), CI green on that commit; GitHub release "v0.1.0 — MVP", marked as latest |
+| 2026-10-28 | uv 0.13.6 (from Dependabot's PR #9), image rebuilt locally | `uv 0.13.6` inside the image; the CI step that reads uv's version from the Dockerfile extracts `0.13.6`, and fails with an error when the line is missing; smoke test 29/29 |
 | 2026-10-26/27 | Phases 0, 1 and 2 tested by the project owner | Swagger `/health` 200 (Phase 0); `psql` checks (Phase 1); manual list (Phase 2) |
 
 ## Library behaviour verified (instead of assumed)
@@ -182,6 +186,10 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | 17 decimal digits of microseconds reach the year 5138 | The cursor allows at most 17 digits |
 | PostgreSQL's default error log adds the values behind a constraint error: `DETAIL: Key (url)=(<full URL>) already exists` on a duplicate, `Failing row contains (…)` on a CHECK. The development stack's log had 50 and 24 such lines. With `log_error_verbosity=terse` only the `ERROR` line (constraint name) and the `STATEMENT` line remain; the app's statements are parameterised (`$1`), so no value is logged | PostgreSQL starts with `log_error_verbosity=terse` (ADR-044); `test_error_log_leaves_out_row_values` |
 | `docker compose up --wait` (Compose v5.6.1) returns 0 when a one-shot service exits with 0 and the rest are healthy or running, and 1 when the one-shot fails | The CI `stack` job waits on the whole stack, `migrate` included |
+| Dependabot updates a digest-pinned image's tag and digest together, including the named `uv` stage (`FROM …uv:0.13.5@sha256:… AS uv` → `0.13.6@sha256:…`, PR #9, digest checked against GHCR) | Pins by digest do not stop updates (ADR-055) |
+| Dependabot treats a new Python version in the base image as an ordinary update (PR #10: `3.13.18-slim` → `3.15.0-slim`) | Python minor and major updates are ignored; CI had already stopped it: the image no longer built (`No interpreter found for Python 3.13`) |
+| `gitleaks` (`generic-api-key`) flags any "api key" variable with a varied value, a made-up test key included | The test key's finding is listed in `.gitleaksignore` after review |
+| `gh pr edit` (GitHub CLI) fails on this repository with a GraphQL error about the deprecated classic Projects | PR titles and bodies edited through the REST API (`gh api -X PATCH repos/…/pulls/N`) |
 | Docker Hub limits anonymous registry requests to 100 per hour per address (`ratelimit-limit: 100;w=3600`); `docker buildx imagetools inspect` makes several per image | Digests looked up sparingly; GitHub-hosted runners pull without hitting it |
 
 ## Query performance (2026-10-28)
@@ -222,19 +230,20 @@ No measured run of the batch delete in its final form (by `ctid`) contains a seq
 | Valkey | 9.1.3 (9.1.2 until Phase 6) |
 | Redis (only to reproduce an ArdiQ issue) | 7.4.12 |
 | Docker / Compose | 29.9.2 / v5.6.1 |
-| uv | 0.13.5 (host, CI and image) |
+| uv | 0.13.6 in CI and the image (CI reads it from the Dockerfile); 0.13.5 on the development host |
 | GitHub Actions | `actions/checkout` v7.0.1, `astral-sh/setup-uv` v10.3.2, runner image `ubuntu24/20261025.353` |
 | actionlint | 1.7.7 |
+| gitleaks | 8.30.1 |
 
-## Size (2026-10-28, after Phase 5)
+## Size (2026-10-28, after Phase 6)
 
 | Metric | Value | Command |
 |---|---|---|
-| Commits on `main` | 59 | `git rev-list --count main` |
-| Non-blank lines in `src/` | 1774 (1394 after Phase 4) | `find src -name '*.py' \| xargs cat \| grep -cv '^\s*$'` |
-| Non-blank lines in `tests/` | 2082 (1610 after Phase 4) | same, on `tests` |
-| ADRs | 52 | `grep -c "^## ADR-" docs/decisions.md` |
-| Merged PRs | 6 | `gh pr list --state merged` |
+| Commits on `main` | 70 | `git rev-list --count main` |
+| Non-blank lines in `src/` | 1774 (unchanged in Phase 6) | `find src -name '*.py' \| xargs cat \| grep -cv '^\s*$'` |
+| Non-blank lines in `tests/` | 2093 (2082 after Phase 5) | same, on `tests` |
+| ADRs | 58 | `grep -c "^## ADR-" docs/decisions.md` |
+| Merged PRs | 7 | `gh pr list --state merged` |
 
 ## Upstream issues
 

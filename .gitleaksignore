@@ -1,0 +1,5 @@
+# Reviewed gitleaks findings that are not secrets (one fingerprint per line).
+
+# TEST_API_KEY in tests/conftest.py: a made-up key the tests use, never a
+# real one (generic-api-key matches any "api key" with a varied value).
+3cd4b055d265f5ad60f54bd917311a92a2c40143:tests/conftest.py:generic-api-key:26

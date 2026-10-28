@@ -364,7 +364,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** Fase 6 — CI y presentación, **construida** en la rama `phase-6-ci-and-presentation` (PR #7, en borrador). Falta que Toni la verifique, pasar el PR a "listo" y fusionarlo. Después: `gitleaks`, release v0.1.0 y repo público. Fase 5 cerrada (PR #6 fusionado el 2026-10-28, verificada por Toni).
+- **Fase actual:** **MVP completo: release v0.1.0** (2026-10-28). Fase 6 cerrada (PR #7 fusionado el 2026-10-28; CI en verde también en `main`). El cierre (`.gitleaksignore`, ajustes de Dependabot y uv, documentación) va en la rama `phase-6-close`. Siguiente: la Fase 7, en modo plan.
 - **Hecho en Fase 6:**
   - `.github/workflows/ci.yml` con los jobs `lint`, `test` y `stack`, en verde en GitHub;
   - prueba del rojo: PR #8, cerrado sin fusionar, con los logs del fallo revisados;
@@ -374,7 +374,12 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - `log_error_verbosity=terse` en PostgreSQL (ADR-044);
   - README de escaparate con capturas, y licencia MIT;
   - 267 tests;
-  - ADR-053 a ADR-058.
+  - ADR-053 a ADR-058;
+  - **al cerrar:**
+    - escaneo con `gitleaks` de todo lo que hay en GitHub (ramas y PR): un solo hallazgo, un falso positivo (la clave inventada de los tests), apuntado en `.gitleaksignore`;
+    - etiqueta `v0.1.0` y release "v0.1.0 — MVP";
+    - Dependabot ignora los saltos menores y mayores de Python (PR #10 cerrado);
+    - la versión de uv sale solo del Dockerfile (CI la lee de ahí) y sube a 0.13.6, lo mismo que proponía el PR #9.
 - **Cambios descubiertos en Fase 6 (durante la construcción):**
   - **PostgreSQL escribía las URLs en su log de errores.** Al repetir una URL salía `DETAIL: Key (url)=(<URL>) already exists`, y en una CHECK, la fila entera. Lo escribe el propio servidor, no nuestro código. Arreglado con `log_error_verbosity=terse` (ADR-044) y un test.
   - **Docker Hub limita las consultas anónimas a 100 por hora** (cabecera `ratelimit-limit: 100;w=3600`). Inspeccionar digests con `docker buildx imagetools inspect` gasta varias por imagen. Los runners de GitHub descargan sin problema.
@@ -382,7 +387,10 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - **Valkey pasa de 9.1.2 a 9.1.3** al fijar las imágenes: es lo que publicaba `valkey/valkey:9` el 2026-10-28. PostgreSQL sigue en 18.6 y Python en 3.13.18.
   - **`python:3.13-slim` y `python:3.13.18-slim` tienen digests de índice distintos,** pero las mismas imágenes por plataforma (amd64 y arm64 coinciden). Se fija la pareja exacta etiqueta + digest.
   - **Los avisos "Failed to save: Unable to reserve cache" de `setup-uv`** aparecen cuando dos jobs intentan guardar la misma caché a la vez. Son inofensivos: uno de los dos la guarda.
-  - **El diagrama Mermaid** no se puede comprobar desde la terminal: GitHub lo dibuja en el navegador. Lo revisa Toni en GitHub.
+  - **El diagrama Mermaid** no se puede comprobar desde la terminal: GitHub lo dibuja en el navegador. Toni confirmó el 2026-10-28 que se dibuja bien.
+  - **Dependabot entiende los pines por digest:** su primer PR (#9) subió uv cambiando etiqueta y digest a la vez, en la etapa `AS uv`. También propuso Python 3.15 (#10), y CI lo paró: la imagen ya no construía.
+  - **`gh pr edit` falla en este repo** por un error de GraphQL con los Projects antiguos de GitHub. Los PR se editan con la API REST (`gh api -X PATCH repos/3fxsty/pulseops/pulls/N`).
+  - **En el equipo de desarrollo, uv sigue en 0.13.5;** la imagen y CI usan 0.13.6. Si se quiere igualar: `uv self update`.
 - **Hecho en Fase 5:**
   - `GET /api/v1/monitors/{id}/checks` (historial con cursor opaco) y `GET /api/v1/monitors/{id}/stats` (estado actual, uptime, media y p95, recuentos);
   - `pulseops/status.py`, `pulseops/timestamps.py` y `api/cursors.py`;
@@ -477,12 +485,14 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - cambio de httpx a httpx2;
   - ADR-001 a ADR-008.
 - **Pendiente de decidir:** interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
-- **Pendiente de hacer (Toni), al pasar el repo a público con la v0.1.0:** activar el escaneo de secretos con push protection y proteger `main` para exigir el check verde de CI. En un repo privado del plan Free, GitHub no ofrece ninguna de las dos (comprobado el 2026-10-28: `main` no está protegida).
+- **Pendiente de hacer (Toni):**
+  - pasar el repo a público (desde Settings);
+  - después, activar el escaneo de secretos con push protection y proteger `main` para que exija los tres checks de CI (Lint, Tests, Full stack). En un repo privado del plan Free, GitHub no ofrece ninguna de las dos (comprobado el 2026-10-28: `main` no está protegida).
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
 - **Siguiente paso:**
-  1. Toni verifica la Fase 6 (pestaña Actions, README en GitHub con el diagrama y las capturas) → PR #7 a "listo" → Toni lo fusiona.
-  2. Escaneo de todo el historial con `gitleaks` → release v0.1.0 (etiqueta + notas) → repo público → Toni activa el escaneo de secretos y la protección de `main`.
-  3. Cerrar la Fase 6 en `docs/evidence.md` y aquí. MVP completo.
+  1. PR de cierre de la Fase 6 (`phase-6-close`) con el OK de Toni, y que lo fusione. Después, comprobar que Dependabot cierra solo el PR #9 (ya no hace falta); si no, cerrarlo a mano.
+  2. Toni: repo público, escaneo de secretos y protección de `main`.
+  3. Empezar la Fase 7 (alertas e incidentes) en modo plan.

@@ -3,6 +3,9 @@
 # Hardening: read-only token, actions pinned to a commit SHA (a tag can be
 # moved to point at other code; a SHA cannot), no pull_request_target (it
 # would run a PR's code with the repository's permissions).
+#
+# uv's version is read from the Dockerfile in every job: one source, so CI
+# and the image use the same uv, also when Dependabot bumps it there.
 
 name: CI
 
@@ -29,9 +32,15 @@ jobs:
         with:
           # Do not leave the token in .git/config for later steps.
           persist-credentials: false
+      - name: Read uv's version from the Dockerfile
+        id: uv
+        run: |
+          version=$(sed -nE 's#^FROM ghcr\.io/astral-sh/uv:([0-9.]+)@.*#\1#p' Dockerfile)
+          test -n "$version" || { echo "::error::uv's version not found in the Dockerfile"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
-          version: "0.13.5" # same as the Dockerfile
+          version: ${{ steps.uv.outputs.version }}
       # --locked fails if uv.lock is out of date, so CI runs the exact
       # versions of Ruff and pytest used locally.
       - run: uv sync --locked
@@ -47,9 +56,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Read uv's version from the Dockerfile
+        id: uv
+        run: |
+          version=$(sed -nE 's#^FROM ghcr\.io/astral-sh/uv:([0-9.]+)@.*#\1#p' Dockerfile)
+          test -n "$version" || { echo "::error::uv's version not found in the Dockerfile"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
-          version: "0.13.5" # same as the Dockerfile
+          version: ${{ steps.uv.outputs.version }}
       - name: Create a throwaway .env with random secrets
         run: python3 scripts/ci_env.py
       # The same Compose file as local development, not GitHub service
@@ -80,9 +95,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Read uv's version from the Dockerfile
+        id: uv
+        run: |
+          version=$(sed -nE 's#^FROM ghcr\.io/astral-sh/uv:([0-9.]+)@.*#\1#p' Dockerfile)
+          test -n "$version" || { echo "::error::uv's version not found in the Dockerfile"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
-          version: "0.13.5" # same as the Dockerfile
+          version: ${{ steps.uv.outputs.version }}
       - name: Create a throwaway .env with random secrets
         run: python3 scripts/ci_env.py
       # --wait returns once migrate has exited with 0 and every other service

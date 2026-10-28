@@ -12,6 +12,12 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # A new Python version (3.13 -> 3.14) is a decision (ADR-004) that also
+      # changes .python-version and requires-python: done by hand. Patch
+      # updates (3.13.x) still come through.
+      - dependency-name: "python"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
 
   - package-ecosystem: "docker-compose"
     directory: "/"
