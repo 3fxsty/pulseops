@@ -4,15 +4,17 @@
     uv run python scripts/smoke_test.py [--base-url http://127.0.0.1:8000]
 
 pytest checks the app from the inside against the test database; this script
-checks the real running stack the way a user would. It only touches the
+checks the real running stack the way a user would, worker included (it
+waits for a new monitor's first automatic check). It only touches the
 monitors it creates (unique URLs per run) and deletes them at the end, so it
 is safe to run against a stack with real data. The API key comes from .env.
-Exit code 0 means every check passed.
+It needs internet access. Exit code 0 means every check passed.
 """
 
 import argparse
 import re
 import sys
+import time
 import uuid
 
 import httpx2
@@ -20,6 +22,16 @@ import httpx2
 from pulseops.config import ApiSettings
 
 PROBLEM_KEYS = {"type", "title", "status", "detail", "code"}
+CHECK_KEYS = {
+    "scheduled_at",
+    "is_up",
+    "status_code",
+    "response_time_ms",
+    "error_kind",
+    "error_detail",
+}
+# The scheduler ticks every 5 s; a new monitor is due at once.
+FIRST_CHECK_TIMEOUT_SECONDS = 20
 INTERNALS = re.compile(r"uq_|ck_|pk_|fk_|SELECT|INSERT|UPDATE |Traceback|asyncpg")
 
 
@@ -223,7 +235,67 @@ def run(base_url: str, api_key: str) -> list[tuple[bool, str, str]]:
                 "validation_error",
             )
 
-            # 6. Not found and delete
+            # 6. Automatic checks, history and stats (needs the worker)
+            watched = smoke.create(
+                name="Watched",
+                url=f"https://www.google.com/?smoke={run_id}",
+                interval_seconds=30,
+            ).json()
+            created.append(watched["id"])
+            checks_url = f"{base}/{watched['id']}/checks"
+            stats_url = f"{base}/{watched['id']}/stats"
+            started = time.monotonic()
+            while True:
+                history = client.get(checks_url, params={"limit": 1})
+                waited = time.monotonic() - started
+                if history.json().get("items") or waited > FIRST_CHECK_TIMEOUT_SECONDS:
+                    break
+                time.sleep(1)
+            smoke.check(
+                f"first check arrives on its own ({waited:.0f} s)",
+                history,
+                200,
+                extra=lambda r, b: (
+                    len(b["items"]) == 1 and set(b["items"][0]) == CHECK_KEYS
+                ),
+            )
+            smoke.check(
+                "stats of the last 24 h",
+                client.get(stats_url, params={"period": "24h"}),
+                200,
+                extra=lambda r, b: (
+                    b["status"] == "up"
+                    and b["checks_total"] >= 1
+                    and b["uptime_percent"] == 100.0
+                    and {"from", "to", "last_check"} <= b.keys()
+                ),
+            )
+            smoke.check(
+                "forged history cursor",
+                client.get(checks_url, params={"cursor": "forged-cursor"}),
+                422,
+                "invalid_cursor",
+                extra=lambda r, b: "forged-cursor" not in r.text,
+            )
+            smoke.check(
+                "unknown stats period",
+                client.get(stats_url, params={"period": "1y"}),
+                422,
+                "validation_error",
+            )
+            smoke.check(
+                "pause the watched monitor",
+                client.patch(f"{base}/{watched['id']}", json={"is_active": False}),
+                200,
+            )
+            smoke.check(
+                "stats say paused",
+                client.get(stats_url),
+                200,
+                extra=lambda r, b: b["status"] == "paused",
+            )
+
+            # 7. Not found and delete
             wrong = google["id"][:-1] + ("0" if google["id"][-1] != "0" else "1")
             smoke.check(
                 "unknown id", client.get(f"{base}/{wrong}"), 404, "monitor_not_found"
@@ -231,6 +303,12 @@ def run(base_url: str, api_key: str) -> list[tuple[bool, str, str]]:
             smoke.check("delete", client.delete(url), 204)
             created.remove(google["id"])
             smoke.check("get after delete", client.get(url), 404, "monitor_not_found")
+            smoke.check(
+                "history after delete",
+                client.get(f"{url}/checks"),
+                404,
+                "monitor_not_found",
+            )
         finally:
             for monitor_id in created:
                 client.delete(f"{base}/{monitor_id}")
