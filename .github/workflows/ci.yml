@@ -68,3 +68,32 @@ jobs:
       - name: PostgreSQL and Valkey logs
         if: failure()
         run: docker compose logs postgres valkey
+
+  # What pytest cannot see: the image builds, migrate runs and exits, the API
+  # turns healthy and the worker checks a new monitor on its own. Needs
+  # internet: the smoke test's monitors point at www.google.com.
+  stack:
+    name: Full stack (Compose + smoke test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5" # same as the Dockerfile
+      - name: Create a throwaway .env with random secrets
+        run: python3 scripts/ci_env.py
+      # --wait returns once migrate has exited with 0 and every other service
+      # is healthy or running; it fails if migrate fails.
+      - name: Build and start the whole stack
+        run: docker compose up --build --detach --wait --wait-timeout 180
+      - run: uv sync --locked
+      - name: Smoke test against the live stack
+        run: uv run python scripts/smoke_test.py
+      # Throwaway data only: secrets generated for this run (and masked) and
+      # the smoke test's own monitors.
+      - name: Stack logs
+        if: failure()
+        run: docker compose logs
