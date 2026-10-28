@@ -15,7 +15,7 @@ Updated at the close of every phase (and whenever a verified fact changes). It c
 | 2 — Monitors API | PR #3, 2026-10-27 | 143 passed | clean (with `S` rules) | 30 | Manual test list: 22/22 against the live stack |
 | 3 — Checker | PR #4, 2026-10-27 | 170 passed, 95 % coverage | clean (with `S` rules) | 38 | Checker inside the container against real sites; smoke test 22/22 |
 | 4 — Automatic checks | PR #5, 2026-10-27 | 213 passed, 97 % coverage | clean (with `S` rules) | 45 | Worker in Compose: a new monitor gets its first check in 2 s, then one per interval; worker restarted after `kill -9`; heartbeat fresh |
-| 5 — Status and statistics | PR pending | 266 passed, 97 % coverage | clean (with `S` rules) | 52 | Smoke test 29/29 (first automatic check in 5 s); query measurement on ~893,000 checks |
+| 5 — Status and statistics | PR #6, 2026-10-28 | 266 passed, 97 % coverage | clean (with `S` rules) | 52 | Smoke test 29/29 (first automatic check in 5 s); query measurement on ~893,000 checks |
 
 Reproduce the current numbers:
 
@@ -126,6 +126,7 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | 2026-10-28 | `ardiq status` in the live worker | Lanes `scheduler`, `maintenance`, `checks`; crons `schedule_due_checks` (every 5 s) and `delete_expired_checks` (next run on the hour) |
 | 2026-10-28 | Query measurement, see "Query performance" | `/stats` 30 days ~19-20 ms; history page ~1.7 ms; batch delete never scans the whole table |
 | 2026-10-28 | Phase 5 tested by the project owner from Swagger | Stats; history followed with `next_cursor` to the end; forged cursor 422; a failing monitor shown as `down`; paused; `unknown` with the worker stopped |
+| 2026-10-28 11:23 UTC | `https://example.com` from a second, unrelated network (another router) | Still down the same way: connection reset after ~40 ms, with `curl` on the host and with the checker in the container. With two different networks failing alike, the router is ruled out; the cause is upstream (provider) or on the development machine itself. Google up; smoke test 29/29 on the same network |
 | 2026-10-26/27 | Phases 0, 1 and 2 tested by the project owner | Swagger `/health` 200 (Phase 0); `psql` checks (Phase 1); manual list (Phase 2) |
 
 ## Library behaviour verified (instead of assumed)
@@ -207,15 +208,15 @@ No measured run of the batch delete in its final form (by `ctid`) contains a seq
 | Redis (only to reproduce an ArdiQ issue) | 7.4.12 |
 | Docker / Compose | 29.9.2 / v5.6.1 |
 
-## Size (2026-10-28, Phase 5 branch)
+## Size (2026-10-28, after Phase 5)
 
 | Metric | Value | Command |
 |---|---|---|
-| Commits on `main` | 51 | `git rev-list --count main` |
-| Non-blank lines in `src/` | 1774 (Phase 5 branch; 1394 after Phase 4) | `find src -name '*.py' \| xargs cat \| grep -cv '^\s*$'` |
-| Non-blank lines in `tests/` | 2082 (Phase 5 branch; 1610 after Phase 4) | same, on `tests` |
+| Commits on `main` | 59 | `git rev-list --count main` |
+| Non-blank lines in `src/` | 1774 (1394 after Phase 4) | `find src -name '*.py' \| xargs cat \| grep -cv '^\s*$'` |
+| Non-blank lines in `tests/` | 2082 (1610 after Phase 4) | same, on `tests` |
 | ADRs | 52 | `grep -c "^## ADR-" docs/decisions.md` |
-| Merged PRs | 5 | `gh pr list --state merged` |
+| Merged PRs | 6 | `gh pr list --state merged` |
 
 ## Upstream issues
 

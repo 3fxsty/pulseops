@@ -331,7 +331,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** Fase 5 — Estado y estadísticas, **construida y verificada por Toni** (2026-10-28) en la rama `phase-5-status-and-stats`. Falta el PR. Fase 4 cerrada (PR #5 fusionado el 2026-10-27, verificada por Toni).
+- **Fase actual:** Fase 6 — CI y presentación, en modo plan (rama `phase-6-ci-and-presentation`). Fase 5 cerrada (PR #6 fusionado el 2026-10-28, verificada por Toni).
 - **Hecho en Fase 5:**
   - `GET /api/v1/monitors/{id}/checks` (historial con cursor opaco) y `GET /api/v1/monitors/{id}/stats` (estado actual, uptime, media y p95, recuentos);
   - `pulseops/status.py`, `pulseops/timestamps.py` y `api/cursors.py`;
@@ -375,6 +375,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - **En la máquina de desarrollo, el puerto 6379 lo ocupa otro Redis** (el del repo de ArdiQ). Por eso Valkey se publica en el 6380.
   - **El test del log sin contraseña tarda unos 10 s,** porque ArdiQ reintenta la conexión y no tiene opción para acortarlo. La suite pasa de ~7 s a ~17 s.
   - **`example.com` sigue sin responder desde la red de desarrollo** (repetido el 2026-10-27 a las 23:33 UTC, ya de madrugada en España y fuera de horario de partidos). La hipótesis "solo durante los partidos" no se confirma; la causa sigue estando en la red. Para verificar se sigue usando Google.
+    - **2026-10-28, desde otra casa (otro router):** falla igual (conexión cortada en ~40 ms, con `curl` y con el comprobador). Con dos redes distintas fallando igual, el router queda descartado: la causa está en el proveedor de internet (si es el mismo en las dos casas) o en el propio equipo de desarrollo (Windows/WSL, antivirus). El resto del stack funciona igual en la red nueva: tests 266/266 y smoke test 29/29.
 - **Hecho en Fase 3:**
   - `pulseops/checker/` (`Checker`, `CheckOutcome`, backend de red con IP fijada, comando `python -m pulseops.checker`);
   - DNS en un pool de hilos propio;
@@ -431,6 +432,5 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
 - **Siguiente paso:**
-  1. Abrir el PR de la Fase 5 con el OK de Toni y que lo fusione.
-  2. Después, cerrar la Fase 5 en `docs/evidence.md` y aquí.
-  3. Empezar la Fase 6 (CI y presentación) en modo plan.
+  1. Commit de cierre de la Fase 5 (con el OK de Toni), primero de la rama `phase-6-ci-and-presentation`.
+  2. Plan de la Fase 6 (CI y presentación) y decisiones de Toni.
