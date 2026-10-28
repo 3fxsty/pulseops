@@ -38,3 +38,33 @@ jobs:
       # The github format annotates the offending lines in the PR.
       - run: uv run ruff check --output-format=github .
       - run: uv run ruff format --check .
+
+  test:
+    name: Tests (pytest + migrations)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5" # same as the Dockerfile
+      - name: Create a throwaway .env with random secrets
+        run: python3 scripts/ci_env.py
+      # The same Compose file as local development, not GitHub service
+      # containers: those start before checkout, so they cannot mount the
+      # roles script, and they cannot start Valkey with --requirepass.
+      - name: Start PostgreSQL and Valkey
+        run: docker compose up -d --wait postgres valkey
+      - run: uv sync --locked
+      # Already covered by the tests (on pulseops_test); as a step of its own
+      # it shows up by name, and it runs on the database the roles script
+      # just created, as the migrate service does.
+      - name: Migrations apply cleanly and match the models
+        run: uv run alembic upgrade head && uv run alembic check
+      - name: Tests with coverage (at least 95 %)
+        run: uv run pytest --cov
+      - name: PostgreSQL and Valkey logs
+        if: failure()
+        run: docker compose logs postgres valkey

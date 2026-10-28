@@ -53,3 +53,5 @@ concurrency = ["greenlet", "thread"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+# `pytest --cov` fails below this, locally and in CI.
+fail_under = 95
