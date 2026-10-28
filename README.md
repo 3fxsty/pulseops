@@ -1,8 +1,56 @@
 # PulseOps
 
-Uptime monitoring for websites and APIs: periodically checks whether they respond, how long they take, and keeps the history to compute availability.
+[![CI](https://github.com/3fxsty/pulseops/actions/workflows/ci.yml/badge.svg)](https://github.com/3fxsty/pulseops/actions/workflows/ci.yml)
 
-> Work in progress — see [`docs/decisions.md`](docs/decisions.md) for the design decisions so far.
+Uptime monitoring for websites and APIs. Add a URL and PulseOps checks it on its own, every 30 seconds or more, keeps 30 days of history and tells you how the site has been doing: current status, uptime and response times.
+
+Version 0.1.0 is the MVP: an HTTP API with Swagger UI, a worker that runs the checks, PostgreSQL and Valkey, all started with one `docker compose up`. It is a portfolio project focused on backend and DevOps practice:
+
+- every design decision is recorded, with the options that were rejected, in [`docs/decisions.md`](docs/decisions.md);
+- every verified fact (test counts, measurements, library behaviour) is recorded, with how to reproduce it, in [`docs/evidence.md`](docs/evidence.md).
+
+## Features
+
+- **Monitors:** create, list, edit, pause and delete them, each with its own interval (30 s minimum).
+- **Automatic checks:** a site is down if it does not answer, returns 4xx/5xx or takes more than 10 s.
+- **History and statistics:** every check is kept for 30 days. `/stats` gives the current status, uptime, and mean and p95 response times over the last 24 hours, 7 days or 30 days.
+- **Safe by default:** API key, SSRF protection on every connection, least-privilege database roles, and neither secrets nor monitored URLs in any log.
+- **Tested:** automated tests against real PostgreSQL and Valkey, and CI that builds and smoke-tests the whole stack on every pull request. Current test counts, coverage and measurements are in [`docs/evidence.md`](docs/evidence.md).
+
+## Architecture
+
+```mermaid
+flowchart LR
+    client([Client or Swagger UI])
+    site([Monitored site])
+
+    subgraph compose [docker compose]
+        api[API<br/>FastAPI]
+        pg[(PostgreSQL<br/>monitors, schedule,<br/>check history)]
+        valkey[(Valkey<br/>task queue)]
+        subgraph worker [Worker: ArdiQ]
+            scheduler[Scheduler<br/>every 5 s]
+            check[Check task]
+            retention[Retention<br/>every hour]
+        end
+        migrate[migrate<br/>one-shot]
+    end
+
+    client -- "HTTP + X-API-Key" --> api
+    api -- "monitors, history, stats" --> pg
+    scheduler -- "claim due monitors" --> pg
+    scheduler -- "enqueue checks (ids only)" --> valkey
+    valkey -- "deliver" --> check
+    check -- "GET, SSRF-checked" --> site
+    check -- "store the outcome" --> pg
+    retention -- "delete checks > 30 days" --> pg
+    migrate -. "schema, as the owner role" .-> pg
+```
+
+- **The API never talks to the queue.** It only reads and writes PostgreSQL, so it never holds the Valkey password.
+- **The schedule lives in PostgreSQL, not in the queue.** Every 5 s, the scheduler claims the monitors that are due, moves each one to its next slot and enqueues their checks, all in one transaction. If Valkey is lost, at most one check per monitor is lost.
+- **Checks are idempotent.** A check is stored under `(monitor, slot)`, so a task delivered twice is stored once.
+- **`migrate` runs first** and exits: it applies the database migrations as the schema owner, and the API and the worker start only after it succeeds.
 
 ## Quick start
 
@@ -27,6 +75,56 @@ Every long-running service restarts on its own after a crash (`restart: unless-s
 
 - API health check: <http://localhost:8000/health>
 - Swagger UI: <http://localhost:8000/docs>. Click **Authorize** and paste your `API_KEY`.
+
+## Example
+
+```bash
+API_KEY=…  # the one in .env
+curl -s -X POST http://127.0.0.1:8000/api/v1/monitors \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"name": "Google", "url": "https://www.google.com", "interval_seconds": 30}'
+# a few minutes later
+curl -s "http://127.0.0.1:8000/api/v1/monitors/<id>/stats?period=24h" -H "X-API-Key: $API_KEY"
+```
+
+A real response, from a monitor checking Google every 30 s for about six minutes:
+
+```json
+{
+  "status": "up",
+  "last_check": {
+    "scheduled_at": "2026-10-28T12:07:10.452511Z",
+    "is_up": true,
+    "status_code": 200,
+    "response_time_ms": 236,
+    "error_kind": null,
+    "error_detail": null
+  },
+  "period": "24h",
+  "from": "2026-10-27T12:07:39.354335Z",
+  "to": "2026-10-28T12:07:39.354335Z",
+  "uptime_percent": 100.0,
+  "avg_response_time_ms": 245.6,
+  "p95_response_time_ms": 301.0,
+  "checks_total": 11,
+  "checks_up": 11,
+  "checks_down": 0
+}
+```
+
+## Design highlights
+
+Each point links to the decision record that explains it, including the options that were rejected and why.
+
+- **SSRF protection where it matters.** PulseOps visits URLs that users give it, so a URL must never reach an internal address (cloud metadata, the database, the host). URLs are validated when they are saved ([ADR-023](docs/decisions.md#adr-023--ssrf-protection-on-create-and-edit)) and again at every TCP connection, redirects included. The connection goes to the very IP that was validated, which defeats DNS rebinding ([ADR-031](docs/decisions.md#adr-031--ssrf-at-connect-time-ip-pinning-no-proxies)).
+- **Only validated URLs can be stored.** The repository accepts a `ValidatedUrl`, a type that only the validation step can create ([ADR-030](docs/decisions.md#adr-030--validatedurl-only-validated-urls-reach-the-database)).
+- **Least privilege in the database.** The app role reads and writes rows only; migrations run as a separate owner role; the superuser is never used by PulseOps ([ADR-014](docs/decisions.md#adr-014--migrations-one-shot-migrate-service-and-three-database-roles)).
+- **A schedule that survives restarts.** One global scheduler claims due monitors with `FOR NO KEY UPDATE SKIP LOCKED` and enqueues before it commits, so a failed enqueue loses nothing ([ADR-039](docs/decisions.md#adr-039--scheduling-one-global-scheduler-the-schedule-in-postgresql)). Missed slots are skipped, not piled up ([ADR-040](docs/decisions.md#adr-040--next-slot-missed-periods-and-rescheduling-on-edit)).
+- **Idempotent check tasks.** Tasks carry ids only (never the URL), hold no database connection while they check, and insert with `ON CONFLICT DO NOTHING` ([ADR-041](docs/decisions.md#adr-041--the-check-task-idempotent-ids-only-no-connection-held)).
+- **URLs and secrets stay out of the logs**, since URLs may carry tokens: not in the worker's lines, not in the HTTP client's, not in SQLAlchemy's errors, not in PostgreSQL's error log ([ADR-044](docs/decisions.md#adr-044--secrets-and-urls-stay-out-of-the-logs)).
+- **Honest statistics.** Uptime is counted in checks, and a period without data is `null`, neither 0 % nor 100 % ([ADR-046](docs/decisions.md#adr-046--uptime-is-counted-in-checks-no-data-is-not-a-number)). The history is paged with opaque, strictly decoded cursors ([ADR-050](docs/decisions.md#adr-050--opaque-history-cursors)).
+- **Retention without full scans.** Old checks are deleted hourly in short batches by physical row address, on a queue lane of their own ([ADR-051](docs/decisions.md#adr-051--retention-hourly-batch-deletes-on-a-dedicated-lane)).
+- **A hardened CI.** Read-only token, actions and Docker images pinned by SHA and digest, and secrets generated for each run (see [Continuous integration](#continuous-integration)).
 
 ## API
 
@@ -117,6 +215,23 @@ docker compose exec api python -m pulseops.checker https://www.google.com
 uv run python scripts/smoke_test.py
 ```
 
+### Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every pull request and on every push to `main`, with three jobs in parallel:
+
+| Job | What it checks |
+|---|---|
+| Lint | `ruff check` (security rules included) and `ruff format --check` |
+| Tests | `alembic upgrade head` and `alembic check` on a fresh database, then `pytest --cov` (fails below 95 %), against PostgreSQL and Valkey started from `docker-compose.yml` |
+| Full stack | `docker compose up --build --wait` (image, migrations, API, worker) and the smoke test against it |
+
+- **Secrets:** `scripts/ci_env.py` writes a fresh `.env` from `.env.example` for every run, with random values masked in the logs. No password lives in the repository.
+- **Hardening:**
+  - the workflow's token is read-only;
+  - actions are pinned to a commit SHA, and Docker images to a digest;
+  - Dependabot keeps those pins, the Python dependencies and the images up to date;
+  - there is no `pull_request_target`.
+
 ## Checker
 
 A site is **down** if it does not answer, returns 4xx/5xx, or takes more than 10 s (one deadline for DNS, connection, TLS, up to 5 redirects and the final headers). The body is never downloaded. Every TCP connection, including each redirect, is SSRF-checked at connect time and pinned to the validated IP. Failures are classified as `timeout`, `dns_error`, `connection_error`, `ssl_error`, `http_error` or `blocked_target`.
@@ -156,7 +271,7 @@ docker compose exec worker ardiq status pulseops.worker:app
 
 ## Performance
 
-`scripts/measure_queries.py` seeds the test database with realistic history (10 monitors × 31 days every 30 s, ~893,000 checks), times the history, stats and retention queries, prints their plans, and deletes everything it created:
+`scripts/measure_queries.py` seeds the test database with realistic history (by default, 10 monitors × 31 days of checks every 30 s), times the history, stats and retention queries, prints their plans, and deletes everything it created:
 
 ```bash
 uv run python scripts/measure_queries.py            # summary
@@ -165,3 +280,16 @@ uv run python scripts/measure_queries.py --monitors 1000 --interval 3600   # oth
 ```
 
 Measured results are recorded in [`docs/evidence.md`](docs/evidence.md).
+
+## Roadmap
+
+The MVP ends here. Next, in order:
+
+1. **Alerts and incidents:** Telegram notifications, consecutive failures grouped into incidents, and `/health` reporting a stalled scheduler.
+2. **UI and metrics:** Grafana and/or an HTMX page; Prometheus metrics.
+3. **Deployment:** a VPS behind Nginx or Caddy, with HTTPS and automatic deploys.
+4. **Extras:** users and login instead of the API key, a public status page.
+
+## License
+
+[MIT](LICENSE) © 2026 3fxsty
