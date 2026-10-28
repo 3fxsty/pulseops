@@ -971,7 +971,7 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 
 ---
 
-## ADR-044 — Secrets and URLs stay out of the worker's logs
+## ADR-044 — Secrets and URLs stay out of the logs
 
 - **Date:** 2026-10-27 (Phase 4)
 - **Status:** Accepted
@@ -985,8 +985,12 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 - **The scheduler's errors are logged, not raised.** A failing tick (database or Valkey down) logs `scheduling failed, retrying next tick: <error>` and returns 0. The claim has rolled back, so the next tick, 5 s later, retries the same slots.
   - **Why:** raising would add a dead letter every 5 s for as long as the outage lasts.
   - **The password stays out:** ArdiQ's errors do not include the Valkey password (`test_scheduler_error_log_never_shows_the_broker_password`, against the real Valkey with a wrong password).
+- **PostgreSQL's own error log: `log_error_verbosity=terse`** (added 2026-10-28, Phase 6, found while checking what a failed CI job would print).
+  - **Why:** on a duplicate monitor URL (the 409 path), PostgreSQL logs `DETAIL: Key (url)=(<the full URL>) already exists`; a CHECK violation logs the whole failing row. Our code never writes these lines: the server does.
+  - **What terse does:** it drops the `DETAIL`, `HINT` and `CONTEXT` lines and keeps the `ERROR` line with the constraint's name. The `STATEMENT` line stays, but the app sends parameterised queries (`$1`), so it carries no values. Verified on a throwaway PostgreSQL 18 with a URL carrying a token.
+  - **Where:** in `docker-compose.yml` (`postgres -c log_error_verbosity=terse`), so it also applies to existing volumes. `test_error_log_leaves_out_row_values` failed before the change.
 
-**Weak point.** While ticks fail, `ardiq status` reports the cron's last run as succeeded. The scheduler heartbeat (ADR-045) is the reliable signal.
+**Weak point.** While ticks fail, `ardiq status` reports the cron's last run as succeeded. The scheduler heartbeat (ADR-045) is the reliable signal. Debugging a database error without its `DETAIL` line is harder; switch the setting back to `default` for a while if needed.
 
 **Reversibility.** Easy.
 
@@ -1174,3 +1178,149 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 - **The smoke test checks the worker too:** a new monitor must get its first automatic check within 20 s, then `/checks` and `/stats` are checked through the API. 29 checks in total.
 
 **Reversibility.** Easy.
+
+---
+
+## ADR-053 — Continuous integration: three jobs on GitHub Actions, services from Docker Compose
+
+- **Date:** 2026-10-28 (Phase 6)
+- **Status:** Accepted
+
+**Context.** Until now the only guarantees were tests run on the development machine and manual checks by the project owner. CI must check every pull request and every push to `main` the same way, without anyone remembering to.
+
+**Decision.** One workflow, `.github/workflows/ci.yml`, with three jobs in parallel:
+
+| Job | What it checks |
+|---|---|
+| `lint` | `ruff check` (with the `github` output format, which annotates the PR's lines) and `ruff format --check` |
+| `test` | `alembic upgrade head` + `alembic check` on a fresh database, then `pytest --cov` with the coverage floor (ADR-056) |
+| `stack` | `docker compose up --build --detach --wait` (image, `migrate`, API, worker) and `scripts/smoke_test.py` against it |
+
+- **PostgreSQL and Valkey come from `docker-compose.yml`, not from GitHub service containers.** Service containers start before checkout, so they cannot mount `docker/postgres/initdb/01-roles.sh` (roles and `pulseops_test`), and they cannot start Valkey with `--requirepass`. With Compose, CI also tests the Compose file itself.
+- **`uv sync --locked` with uv 0.13.5** (the Dockerfile's): CI fails if `uv.lock` is stale, and runs the exact Ruff and pytest versions used locally.
+- **`alembic check` as a step of its own,** although pytest runs it too (`test_models_match_migrations`): it shows up by name, and it runs on the database the roles script has just created, as the `migrate` service does.
+- **The `stack` job** proves what pytest cannot see: the image builds, `migrate` runs and exits, the API turns healthy and the worker checks a new monitor on its own.
+  - **Verified:** `docker compose up --wait` (Compose v5.6.1) returns 0 when the one-shot `migrate` exits with 0, and 1 when it fails.
+- **On failure, the service logs are printed** (`docker compose logs`). Reviewed line by line on a deliberately failed run (see `docs/evidence.md`): no secrets, no monitored URLs beyond the smoke test's own, no personal data.
+- **Verified red:** a throwaway PR with one smoke test case broken on purpose failed the `stack` job (28/29) while `lint` and `test` passed. It was closed without merging.
+
+**Rejected.**
+- **GitHub service containers:** the roles script would be duplicated in the workflow, and Valkey would run without a password, unlike production.
+- **One single job:** simpler, but slower, and a failure says less about what broke.
+- **The `stack` job only on `main` or by hand:** it is the most valuable check (one `docker compose up` is MVP requirement 5). Revisit if its dependency on the internet makes it flaky.
+
+**Weak point.** The `stack` job needs `www.google.com` to answer from GitHub's runners; if it does not, the job is red for a reason outside the code.
+
+**Reversibility.** Easy: only the workflow.
+
+---
+
+## ADR-054 — CI secrets: a throwaway `.env` for every run
+
+- **Date:** 2026-10-28 (Phase 6)
+- **Status:** Accepted
+
+**Decision.** `scripts/ci_env.py` writes `.env` from `.env.example`, replacing every value that starts with `change-me` with `secrets.token_hex(24)` (48 characters).
+- **Masked:** on GitHub Actions it prints `::add-mask::<value>` for each one, so GitHub hides it in every later log line. Hex values have no URL-encoded variant that could slip past the mask.
+- **Safe to run by mistake:** it never overwrites an existing file (`O_EXCL`), and creates it readable by its owner only (`0o600`).
+- **Standard library only:** it runs before any dependency is installed.
+- **A free check:** CI starts from `.env.example` as a newcomer would, so an incomplete example fails CI.
+- **Never published:** there are no artifacts, and `.dockerignore` keeps `.env` out of the image.
+
+**Rejected.**
+- **Fixed values in the workflow:** passwords in the repository, which the security rules forbid, and secret scanners would flag.
+- **GitHub secrets:** nothing real to protect, and they do not reach pull requests from forks.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-055 — Supply chain: pins by SHA and digest, a hardened workflow
+
+- **Date:** 2026-10-28 (Phase 6)
+- **Status:** Accepted
+
+**Context.** A third-party action runs code with access to the repository, and a tag can be moved to point at other code (in March 2025, the tags of `tj-actions/changed-files` were moved to code that leaked secrets). Docker image tags move the same way.
+
+**Decision.**
+- **Actions pinned to a commit SHA** with the version as a comment: `actions/checkout@3d3c42e… # v7.0.1`, `astral-sh/setup-uv@07a047e… # v10.3.2` (SHAs resolved with `gh api`).
+- **Docker images pinned by digest** (requested by the project owner): `python:3.13.18-slim@sha256:…`, `ghcr.io/astral-sh/uv:0.13.5@sha256:…`, `postgres:18.6@sha256:…`, `valkey/valkey:9.1.3@sha256:…`.
+  - **The multi-platform index digest** (amd64 and arm64), from `docker buildx imagetools inspect`.
+  - **The exact tag is the version label:** with a digest, Docker ignores the tag, and Dependabot updates both. A separate comment would go stale.
+  - **uv is a named stage** (`FROM …uv… AS uv`, then `COPY --from=uv`), so Dependabot sees it as an image.
+- **Dependabot** also for `github-actions` (the `uv`, `docker` and `docker-compose` ecosystems already existed).
+  - **PostgreSQL major versions are ignored:** a major upgrade changes the on-disk format and needs `pg_upgrade` or a dump and restore, so it is done by hand.
+- **Workflow hardening:**
+  - `permissions: contents: read` for the whole workflow;
+  - triggers: `pull_request` and `push` to `main`; never `pull_request_target`, which runs a PR's code with the repository's permissions and secrets;
+  - `persist-credentials: false` on checkout, so the token does not stay in `.git/config`;
+  - `concurrency`: a new push to a PR cancels its previous run; runs on `main` always finish;
+  - `timeout-minutes` on every job, and the runner pinned to `ubuntu-24.04`, not `ubuntu-latest`.
+- **Checked with `actionlint`** (1.7.7, run in Docker) before each push.
+
+**Weak point.** Pins are less readable, and Dependabot opens more pull requests.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-056 — Coverage floor: 95 %
+
+- **Date:** 2026-10-28 (Phase 6)
+- **Status:** Accepted
+
+**Decision.** `fail_under = 95` in `[tool.coverage.report]` (`pyproject.toml`), so `pytest --cov` fails below 95 % locally and in CI alike. Coverage was 97 % when it was set.
+
+**Rejected.**
+- **No floor, report only:** it would not stop a slow decline.
+- **97 %:** too tight; a small change would break it.
+
+**Weak point.** A percentage does not measure whether tests are good, and it can push towards filler tests.
+
+**Reversibility.** Easy: one number.
+
+---
+
+## ADR-057 — README as the project's showcase
+
+- **Date:** 2026-10-28 (Phase 6)
+- **Status:** Accepted
+
+**Decision.**
+- **Contents:** the CI badge, what PulseOps is, features, an architecture diagram, quick start, a real `curl` example with a real `/stats` response, design highlights linked to their ADRs, the CI summary, the roadmap and the license.
+- **The diagram is Mermaid,** inside the README: GitHub draws it, it lives as text, it shows in diffs and it does not go stale in a separate image.
+- **Two screenshots by the project owner** (`docs/images/`): Swagger UI with the routes, and a `/stats` response. Checked before committing:
+  - no browser bar, bookmarks or user name;
+  - no API key: Swagger's "Curl" box, which shows the `X-API-Key` header, is left out;
+  - no hidden PNG metadata (only image chunks, no text or EXIF).
+- **No hand-written project figures in the README** (requested by the project owner): test counts, coverage, ADR counts and timings go stale. They live in `docs/evidence.md`, which is updated every phase, and the README links to it. Business rules (30 s minimum, 10 s, 30 days…) stay: they change only with the code or an ADR. The `/stats` example stays: it is an example, not a project figure.
+
+**Rejected.**
+- **A diagram image** (draw.io, Excalidraw): prettier, but redrawn for every change.
+- **Text only, no screenshots:** never stale, but less telling for a portfolio.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-058 — Release v0.1.0, MIT license, public repository
+
+- **Date:** 2026-10-28 (Phase 6)
+- **Status:** Accepted
+
+**Decision.**
+- **Release:** an annotated tag `v0.1.0` on `main`, after the Phase 6 pull request is merged, and a GitHub release with hand-written notes: the MVP by phase, linking pull requests #1 to #7.
+  - **Why 0.x:** in semantic versioning, anything may still change; 1.0.0 will mean a stable API.
+  - **`pyproject.toml` already says 0.1.0,** and the checker's User-Agent reads it (`PulseOps/0.1.0`).
+  - **A published tag is never moved:** it is created last, with the project owner's approval.
+- **License: MIT**, "Copyright (c) 2026 3fxsty", in `LICENSE` and declared in `pyproject.toml` (`license = "MIT"`, `license-files`, PEP 639). Without a license, a public repository means "all rights reserved".
+- **The repository goes public with v0.1.0,** after a scan of the whole git history with `gitleaks`.
+  - **Then, by the project owner:** secret scanning with push protection, and a protected `main` that requires the CI checks. A private repository on the Free plan gets neither (verified: `main` is not protected today).
+  - **The git history stays as it is:** older commits show the owner's name and a previous email, which the owner accepts. New commits use the GitHub noreply address.
+
+**Rejected.**
+- **A `CHANGELOG.md` as well:** the same content in two places for a single version.
+- **Publishing the image to GHCR:** nobody consumes it until deployment (Phase 9), and CI would need write access to packages.
+- **Rewriting history** (`git filter-repo`) to remove the old email: it changes every SHA and breaks the links from pull requests to their commits.
+
+**Reversibility.** Hard for the tag and for going public: what is published may be cached or copied. Easy for the license choice going forward.

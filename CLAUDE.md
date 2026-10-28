@@ -81,7 +81,7 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 
 | Pieza | Herramienta | Función |
 |---|---|---|
-| Lenguaje | Python 3.12+ | Todo el backend |
+| Lenguaje | Python 3.13 | Todo el backend (ADR-004) |
 | Proyecto y dependencias | uv | Dependencias, entornos virtuales y versión de Python |
 | API | FastAPI | Gestión de monitores y consulta de estado; Swagger automático |
 | Cliente HTTP | httpx2 (async, ≥ 2.13.1) | Hace las comprobaciones y mide el tiempo de respuesta (sustituye a httpx, ver ADR-008) |
@@ -93,7 +93,7 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 | Configuración | pydantic-settings | Lee y valida las variables de entorno; secretos como `SecretStr` (ADR-013) |
 | Tests | pytest | Tests automáticos |
 | Lint y formato | Ruff | Revisión y formato de código |
-| CI/CD | GitHub Actions | Lint + tests en cada push |
+| CI/CD | GitHub Actions | Lint, tests y el stack entero con smoke test en cada PR y en cada push a `main` (ADR-053) |
 | Contenedores | Docker + Docker Compose | Levantar todos los servicios juntos |
 | Interfaz | Swagger (MVP) → **pendiente**: Grafana y/o HTMX | Ver el estado |
 | Alertas | Bot de Telegram (post-MVP) | Avisar de caídas |
@@ -136,6 +136,7 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
   - las tareas de la cola solo llevan ids;
   - los loggers de `httpx2` y `httpcore2` están en WARNING (httpx2 registra cada URL a nivel INFO);
   - el motor de la BD usa `hide_parameters=True`, para que los errores no lleven los parámetros de la consulta.
+  - PostgreSQL arranca con `log_error_verbosity=terse` (en el Compose). Sin esto, al repetir una URL (el 409) escribe en su propio log `DETAIL: Key (url)=(<la URL>) already exists`, y en una CHECK, la fila entera.
 - **ArdiQ siempre con msgpack (su codec por defecto), nunca con pickle**, por el riesgo de ejecución de código en el worker.
 - **Secretos:**
   - Solo en `.env`, que nunca se sube; `.env.example` lleva valores falsos.
@@ -145,6 +146,17 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
   - Escaneo de secretos con push protection en GitHub (ver "Estado actual").
 - **Dependencias** fijadas con `uv.lock`, con Dependabot activo.
 - **Docker:** imágenes ligeras y sin ejecutar como root.
+- **Cadena de suministro** (ADR-055):
+  - las imágenes de Docker se fijan por digest (`imagen:versión@sha256:…`, el del índice multiplataforma), y las acciones de GitHub por SHA, con un comentario de la versión;
+  - Dependabot mantiene al día las dependencias, las imágenes y las acciones; los saltos mayores de PostgreSQL se hacen a mano.
+- **CI (GitHub Actions)** (ADR-053 a ADR-055):
+  - el token del workflow, en solo lectura (`permissions: contents: read`);
+  - disparadores `pull_request` y `push` a `main`. **Nunca `pull_request_target`:** ejecutaría el código de un PR ajeno con los permisos del repo;
+  - `persist-credentials: false` en el checkout;
+  - ningún secreto real: `scripts/ci_env.py` genera un `.env` nuevo en cada ejecución, con valores aleatorios ocultos (`::add-mask::`);
+  - sin artefactos, y `.env` fuera de la imagen (`.dockerignore`);
+  - **los logs de CI serán públicos:** lo que se imprime al fallar (`docker compose logs`) está revisado línea a línea y no lleva secretos ni URLs que no sean las del smoke test;
+  - `actionlint` antes de cada cambio del workflow.
 - **SSRF** (PulseOps visita URLs que da el usuario), en `pulseops/security/ssrf.py` (ADR-023):
   - Solo `http` y `https`, sin credenciales en la URL; se acepta cualquier puerto.
   - Si el host es un nombre, se resuelve el DNS de forma async con timeout. Se bloquea si **alguna** IP resultante no está permitida. Si el DNS falla, se acepta: el check lo marcará como `dns_error` y se volverá a validar.
@@ -297,6 +309,26 @@ Endpoints de estado actual, uptime y latencia media; limpieza automática de dat
 
 **Fase 6 — CI y presentación**
 GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic check`), README con diagrama, instrucciones y capturas.
+- Decidido (ADR-053 a ADR-058):
+  - **PostgreSQL y Valkey en CI con el mismo `docker compose`** que en local, no con los services de GitHub: estos no pueden montar el script de roles ni arrancar Valkey con contraseña.
+  - **Tres jobs en `.github/workflows/ci.yml`:**
+    - `lint`: Ruff check + format;
+    - `test`: pytest con cobertura, más `alembic upgrade head` + `alembic check` como paso propio;
+    - `stack`: `docker compose up --build --wait` + `scripts/smoke_test.py`, con los logs del Compose si falla.
+  - **Secretos de CI:** un `.env` nuevo en cada ejecución a partir de `.env.example`, con valores aleatorios ocultos en los logs (`::add-mask::`). Ninguna contraseña escrita en el repo.
+  - **Seguridad del workflow** (ver "Seguridad"):
+    - acciones fijadas por SHA, con un comentario de la versión;
+    - `permissions: contents: read`;
+    - disparadores `push` a `main` y `pull_request`, nunca `pull_request_target`;
+    - `persist-credentials: false`, `concurrency`, `timeout-minutes` y runner `ubuntu-24.04` fijo.
+  - **Imágenes de Docker fijadas por digest** (`imagen:versión@sha256:…`, el del índice multiplataforma): `postgres`, `valkey`, la base de Python y la de uv del Dockerfile. La etiqueta exacta hace de comentario de la versión, y Dependabot actualiza las dos cosas a la vez.
+  - **Suelo de cobertura del 95 %** en `pyproject.toml`, igual en local que en CI.
+  - **README de escaparate,** con el diagrama en Mermaid, el badge de CI y 2 capturas hechas por Toni, sin datos personales. **Sin cifras del proyecto escritas a mano** (ver "Convenciones").
+  - **Licencia MIT** ("Copyright (c) 2026 3fxsty"), en `LICENSE` y en `pyproject.toml`.
+  - **Release:** etiqueta anotada `v0.1.0` sobre `main` tras fusionar el PR, y release de GitHub con notas a mano. Sin `CHANGELOG.md` ni imagen en GHCR (hasta la Fase 9).
+  - **El repo pasa a público al publicar la v0.1.0,** después de escanear todo el historial con `gitleaks`.
+    - El historial se queda como está: a Toni no le importa que se vean su nombre y el email antiguo.
+    - Al pasar a público, Toni activa el escaneo de secretos con push protection y la protección de `main`, que exige el check verde.
 - Terminada cuando: check verde en GitHub y release **v0.1.0**. → **MVP completo.**
 
 ### Post-MVP
@@ -326,12 +358,31 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - **Configuración:** variables de entorno (`.env`, con `.env.example` en el repo). Nunca subir secretos.
 - **Decisiones:** cada una en `docs/decisions.md`.
 - **Datos verificados** (tests, comprobaciones manuales, versiones, hallazgos): en `docs/evidence.md`.
+- **README sin cifras del proyecto escritas a mano** (número de tests, cobertura, número de ADR, tiempos…), porque se quedan viejas: el README enlaza a `docs/evidence.md`. Las reglas de funcionamiento (30 s, 10 s, 30 días…) y los ejemplos reales sí van.
 
 ---
 
 ## Estado actual
 
-- **Fase actual:** Fase 5 — Estado y estadísticas, **construida y verificada por Toni** (2026-10-28) en la rama `phase-5-status-and-stats`. Falta el PR. Fase 4 cerrada (PR #5 fusionado el 2026-10-27, verificada por Toni).
+- **Fase actual:** Fase 6 — CI y presentación, **construida** en la rama `phase-6-ci-and-presentation` (PR #7, en borrador). Falta que Toni la verifique, pasar el PR a "listo" y fusionarlo. Después: `gitleaks`, release v0.1.0 y repo público. Fase 5 cerrada (PR #6 fusionado el 2026-10-28, verificada por Toni).
+- **Hecho en Fase 6:**
+  - `.github/workflows/ci.yml` con los jobs `lint`, `test` y `stack`, en verde en GitHub;
+  - prueba del rojo: PR #8, cerrado sin fusionar, con los logs del fallo revisados;
+  - `scripts/ci_env.py`;
+  - imágenes fijadas por digest y acciones por SHA, con Dependabot para `github-actions`;
+  - suelo de cobertura del 95 %;
+  - `log_error_verbosity=terse` en PostgreSQL (ADR-044);
+  - README de escaparate con capturas, y licencia MIT;
+  - 267 tests;
+  - ADR-053 a ADR-058.
+- **Cambios descubiertos en Fase 6 (durante la construcción):**
+  - **PostgreSQL escribía las URLs en su log de errores.** Al repetir una URL salía `DETAIL: Key (url)=(<URL>) already exists`, y en una CHECK, la fila entera. Lo escribe el propio servidor, no nuestro código. Arreglado con `log_error_verbosity=terse` (ADR-044) y un test.
+  - **Docker Hub limita las consultas anónimas a 100 por hora** (cabecera `ratelimit-limit: 100;w=3600`). Inspeccionar digests con `docker buildx imagetools inspect` gasta varias por imagen. Los runners de GitHub descargan sin problema.
+  - **`docker compose up --wait` acepta que `migrate` termine con 0** (y falla si `migrate` falla). Verificado con Compose v5.6.1.
+  - **Valkey pasa de 9.1.2 a 9.1.3** al fijar las imágenes: es lo que publicaba `valkey/valkey:9` el 2026-10-28. PostgreSQL sigue en 18.6 y Python en 3.13.18.
+  - **`python:3.13-slim` y `python:3.13.18-slim` tienen digests de índice distintos,** pero las mismas imágenes por plataforma (amd64 y arm64 coinciden). Se fija la pareja exacta etiqueta + digest.
+  - **Los avisos "Failed to save: Unable to reserve cache" de `setup-uv`** aparecen cuando dos jobs intentan guardar la misma caché a la vez. Son inofensivos: uno de los dos la guarda.
+  - **El diagrama Mermaid** no se puede comprobar desde la terminal: GitHub lo dibuja en el navegador. Lo revisa Toni en GitHub.
 - **Hecho en Fase 5:**
   - `GET /api/v1/monitors/{id}/checks` (historial con cursor opaco) y `GET /api/v1/monitors/{id}/stats` (estado actual, uptime, media y p95, recuentos);
   - `pulseops/status.py`, `pulseops/timestamps.py` y `api/cursors.py`;
@@ -375,6 +426,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - **En la máquina de desarrollo, el puerto 6379 lo ocupa otro Redis** (el del repo de ArdiQ). Por eso Valkey se publica en el 6380.
   - **El test del log sin contraseña tarda unos 10 s,** porque ArdiQ reintenta la conexión y no tiene opción para acortarlo. La suite pasa de ~7 s a ~17 s.
   - **`example.com` sigue sin responder desde la red de desarrollo** (repetido el 2026-10-27 a las 23:33 UTC, ya de madrugada en España y fuera de horario de partidos). La hipótesis "solo durante los partidos" no se confirma; la causa sigue estando en la red. Para verificar se sigue usando Google.
+    - **2026-10-28, desde otra casa (otro router):** falla igual (conexión cortada en ~40 ms, con `curl` y con el comprobador). Con dos redes distintas fallando igual, el router queda descartado: la causa está en el proveedor de internet (si es el mismo en las dos casas) o en el propio equipo de desarrollo (Windows/WSL, antivirus). El resto del stack funciona igual en la red nueva: tests 266/266 y smoke test 29/29.
 - **Hecho en Fase 3:**
   - `pulseops/checker/` (`Checker`, `CheckOutcome`, backend de red con IP fijada, comando `python -m pulseops.checker`);
   - DNS en un pool de hilos propio;
@@ -425,12 +477,12 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - cambio de httpx a httpx2;
   - ADR-001 a ADR-008.
 - **Pendiente de decidir:** interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
-- **Pendiente de hacer (Toni):** activar el escaneo de secretos con push protection en GitHub. El repo es privado y ahí GitHub no lo ofrece gratis (requiere Secret Protection, de pago): revisar los ajustes del repo o activarlo cuando el repo pase a público.
+- **Pendiente de hacer (Toni), al pasar el repo a público con la v0.1.0:** activar el escaneo de secretos con push protection y proteger `main` para exigir el check verde de CI. En un repo privado del plan Free, GitHub no ofrece ninguna de las dos (comprobado el 2026-10-28: `main` no está protegida).
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
 - **Siguiente paso:**
-  1. Abrir el PR de la Fase 5 con el OK de Toni y que lo fusione.
-  2. Después, cerrar la Fase 5 en `docs/evidence.md` y aquí.
-  3. Empezar la Fase 6 (CI y presentación) en modo plan.
+  1. Toni verifica la Fase 6 (pestaña Actions, README en GitHub con el diagrama y las capturas) → PR #7 a "listo" → Toni lo fusiona.
+  2. Escaneo de todo el historial con `gitleaks` → release v0.1.0 (etiqueta + notas) → repo público → Toni activa el escaneo de secretos y la protección de `main`.
+  3. Cerrar la Fase 6 en `docs/evidence.md` y aquí. MVP completo.

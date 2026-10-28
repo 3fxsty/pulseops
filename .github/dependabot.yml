@@ -17,3 +17,15 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    ignore:
+      # A PostgreSQL major upgrade (18 -> 19) changes the on-disk format and
+      # needs pg_upgrade or a dump and restore: done by hand, never by a PR.
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
+
+  # The workflow's actions are pinned by SHA; this keeps the SHAs (and their
+  # version comments) up to date.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

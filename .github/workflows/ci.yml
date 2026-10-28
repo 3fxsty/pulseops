@@ -1,0 +1,99 @@
+# Runs on every pull request and on every push to main.
+#
+# Hardening: read-only token, actions pinned to a commit SHA (a tag can be
+# moved to point at other code; a SHA cannot), no pull_request_target (it
+# would run a PR's code with the repository's permissions).
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A new push to a PR cancels its previous run; runs on main always finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Lint (Ruff)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Do not leave the token in .git/config for later steps.
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5" # same as the Dockerfile
+      # --locked fails if uv.lock is out of date, so CI runs the exact
+      # versions of Ruff and pytest used locally.
+      - run: uv sync --locked
+      # The github format annotates the offending lines in the PR.
+      - run: uv run ruff check --output-format=github .
+      - run: uv run ruff format --check .
+
+  test:
+    name: Tests (pytest + migrations)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5" # same as the Dockerfile
+      - name: Create a throwaway .env with random secrets
+        run: python3 scripts/ci_env.py
+      # The same Compose file as local development, not GitHub service
+      # containers: those start before checkout, so they cannot mount the
+      # roles script, and they cannot start Valkey with --requirepass.
+      - name: Start PostgreSQL and Valkey
+        run: docker compose up -d --wait postgres valkey
+      - run: uv sync --locked
+      # Already covered by the tests (on pulseops_test); as a step of its own
+      # it shows up by name, and it runs on the database the roles script
+      # just created, as the migrate service does.
+      - name: Migrations apply cleanly and match the models
+        run: uv run alembic upgrade head && uv run alembic check
+      - name: Tests with coverage (at least 95 %)
+        run: uv run pytest --cov
+      - name: PostgreSQL and Valkey logs
+        if: failure()
+        run: docker compose logs postgres valkey
+
+  # What pytest cannot see: the image builds, migrate runs and exits, the API
+  # turns healthy and the worker checks a new monitor on its own. Needs
+  # internet: the smoke test's monitors point at www.google.com.
+  stack:
+    name: Full stack (Compose + smoke test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          version: "0.13.5" # same as the Dockerfile
+      - name: Create a throwaway .env with random secrets
+        run: python3 scripts/ci_env.py
+      # --wait returns once migrate has exited with 0 and every other service
+      # is healthy or running; it fails if migrate fails.
+      - name: Build and start the whole stack
+        run: docker compose up --build --detach --wait --wait-timeout 180
+      - run: uv sync --locked
+      - name: Smoke test against the live stack
+        run: uv run python scripts/smoke_test.py
+      # Throwaway data only: secrets generated for this run (and masked) and
+      # the smoke test's own monitors.
+      - name: Stack logs
+        if: failure()
+        run: docker compose logs
