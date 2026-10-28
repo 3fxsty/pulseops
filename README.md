@@ -9,6 +9,8 @@ Version 0.1.0 is the MVP: an HTTP API with Swagger UI, a worker that runs the ch
 - every design decision is recorded, with the options that were rejected, in [`docs/decisions.md`](docs/decisions.md);
 - every verified fact (test counts, measurements, library behaviour) is recorded, with how to reproduce it, in [`docs/evidence.md`](docs/evidence.md).
 
+![Swagger UI with the PulseOps endpoints](docs/images/swagger.png)
+
 ## Features
 
 - **Monitors:** create, list, edit, pause and delete them, each with its own interval (30 s minimum).
@@ -111,6 +113,10 @@ A real response, from a monitor checking Google every 30 s for about six minutes
   "checks_down": 0
 }
 ```
+
+The same endpoint in Swagger UI, a few minutes later:
+
+![A /stats response in Swagger UI](docs/images/stats.png)
 
 ## Design highlights
 
