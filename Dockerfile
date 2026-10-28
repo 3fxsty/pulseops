@@ -1,8 +1,14 @@
+# Images are pinned by digest: a tag can be moved to other content, a digest
+# cannot. With a digest the tag is only a label; Dependabot updates both.
+
+# A named stage, so Dependabot sees it as an image (it reads FROM lines).
+FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
+
 # The base image ships ca-certificates, which httpx2 needs: it verifies TLS
 # against the OS trust store (via truststore). Keep them if the base changes.
-FROM python:3.13-slim
+FROM python:3.13.18-slim@sha256:76baad6037690d6e8c4397fbcaef17bca6f19eecef822b708fe8fa3417d30bb5
 
-COPY --from=ghcr.io/astral-sh/uv:0.13.5 /uv /uvx /bin/
+COPY --from=uv /uv /uvx /bin/
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
