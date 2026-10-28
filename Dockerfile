@@ -2,7 +2,7 @@
 # cannot. With a digest the tag is only a label; Dependabot updates both.
 
 # A named stage, so Dependabot sees it as an image (it reads FROM lines).
-FROM ghcr.io/astral-sh/uv:0.13.5@sha256:32a7bb39b496babbd997b0a39a4d66c126bdaf5661b302bf6f06abda8deca6ff AS uv
+FROM ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv
 
 # The base image ships ca-certificates, which httpx2 needs: it verifies TLS
 # against the OS trust store (via truststore). Keep them if the base changes.
