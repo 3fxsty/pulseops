@@ -81,7 +81,7 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 
 | Pieza | Herramienta | Función |
 |---|---|---|
-| Lenguaje | Python 3.12+ | Todo el backend |
+| Lenguaje | Python 3.13 | Todo el backend (ADR-004) |
 | Proyecto y dependencias | uv | Dependencias, entornos virtuales y versión de Python |
 | API | FastAPI | Gestión de monitores y consulta de estado; Swagger automático |
 | Cliente HTTP | httpx2 (async, ≥ 2.13.1) | Hace las comprobaciones y mide el tiempo de respuesta (sustituye a httpx, ver ADR-008) |
@@ -93,7 +93,7 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 | Configuración | pydantic-settings | Lee y valida las variables de entorno; secretos como `SecretStr` (ADR-013) |
 | Tests | pytest | Tests automáticos |
 | Lint y formato | Ruff | Revisión y formato de código |
-| CI/CD | GitHub Actions | Lint + tests en cada push |
+| CI/CD | GitHub Actions | Lint, tests y el stack entero con smoke test en cada PR y en cada push a `main` (ADR-053) |
 | Contenedores | Docker + Docker Compose | Levantar todos los servicios juntos |
 | Interfaz | Swagger (MVP) → **pendiente**: Grafana y/o HTMX | Ver el estado |
 | Alertas | Bot de Telegram (post-MVP) | Avisar de caídas |
@@ -146,6 +146,17 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
   - Escaneo de secretos con push protection en GitHub (ver "Estado actual").
 - **Dependencias** fijadas con `uv.lock`, con Dependabot activo.
 - **Docker:** imágenes ligeras y sin ejecutar como root.
+- **Cadena de suministro** (ADR-055):
+  - las imágenes de Docker se fijan por digest (`imagen:versión@sha256:…`, el del índice multiplataforma), y las acciones de GitHub por SHA, con un comentario de la versión;
+  - Dependabot mantiene al día las dependencias, las imágenes y las acciones; los saltos mayores de PostgreSQL se hacen a mano.
+- **CI (GitHub Actions)** (ADR-053 a ADR-055):
+  - el token del workflow, en solo lectura (`permissions: contents: read`);
+  - disparadores `pull_request` y `push` a `main`. **Nunca `pull_request_target`:** ejecutaría el código de un PR ajeno con los permisos del repo;
+  - `persist-credentials: false` en el checkout;
+  - ningún secreto real: `scripts/ci_env.py` genera un `.env` nuevo en cada ejecución, con valores aleatorios ocultos (`::add-mask::`);
+  - sin artefactos, y `.env` fuera de la imagen (`.dockerignore`);
+  - **los logs de CI serán públicos:** lo que se imprime al fallar (`docker compose logs`) está revisado línea a línea y no lleva secretos ni URLs que no sean las del smoke test;
+  - `actionlint` antes de cada cambio del workflow.
 - **SSRF** (PulseOps visita URLs que da el usuario), en `pulseops/security/ssrf.py` (ADR-023):
   - Solo `http` y `https`, sin credenciales en la URL; se acepta cualquier puerto.
   - Si el host es un nombre, se resuelve el DNS de forma async con timeout. Se bloquea si **alguna** IP resultante no está permitida. Si el DNS falla, se acepta: el check lo marcará como `dns_error` y se volverá a validar.
@@ -298,21 +309,22 @@ Endpoints de estado actual, uptime y latencia media; limpieza automática de dat
 
 **Fase 6 — CI y presentación**
 GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic check`), README con diagrama, instrucciones y capturas.
-- Decidido (plan aprobado el 2026-10-28; los ADR se escriben al documentar):
+- Decidido (ADR-053 a ADR-058):
   - **PostgreSQL y Valkey en CI con el mismo `docker compose`** que en local, no con los services de GitHub: estos no pueden montar el script de roles ni arrancar Valkey con contraseña.
   - **Tres jobs en `.github/workflows/ci.yml`:**
     - `lint`: Ruff check + format;
     - `test`: pytest con cobertura, más `alembic upgrade head` + `alembic check` como paso propio;
     - `stack`: `docker compose up --build --wait` + `scripts/smoke_test.py`, con los logs del Compose si falla.
   - **Secretos de CI:** un `.env` nuevo en cada ejecución a partir de `.env.example`, con valores aleatorios ocultos en los logs (`::add-mask::`). Ninguna contraseña escrita en el repo.
-  - **Seguridad del workflow** (pasa a "Seguridad" al construirlo):
+  - **Seguridad del workflow** (ver "Seguridad"):
     - acciones fijadas por SHA, con un comentario de la versión;
     - `permissions: contents: read`;
     - disparadores `push` a `main` y `pull_request`, nunca `pull_request_target`;
     - `persist-credentials: false`, `concurrency`, `timeout-minutes` y runner `ubuntu-24.04` fijo.
-  - **Imágenes de Docker fijadas por digest** (`imagen:versión@sha256:…`, el del índice multiplataforma), con un comentario de la versión: `postgres`, `valkey`, la base de Python y la de uv del Dockerfile. Dependabot mantiene al día imágenes y acciones.
+  - **Imágenes de Docker fijadas por digest** (`imagen:versión@sha256:…`, el del índice multiplataforma): `postgres`, `valkey`, la base de Python y la de uv del Dockerfile. La etiqueta exacta hace de comentario de la versión, y Dependabot actualiza las dos cosas a la vez.
   - **Suelo de cobertura del 95 %** en `pyproject.toml`, igual en local que en CI.
-  - **README de escaparate,** con el diagrama en Mermaid, el badge de CI y 2 capturas hechas por Toni, sin datos personales.
+  - **README de escaparate,** con el diagrama en Mermaid, el badge de CI y 2 capturas hechas por Toni, sin datos personales. **Sin cifras del proyecto escritas a mano** (ver "Convenciones").
+  - **Licencia MIT** ("Copyright (c) 2026 3fxsty"), en `LICENSE` y en `pyproject.toml`.
   - **Release:** etiqueta anotada `v0.1.0` sobre `main` tras fusionar el PR, y release de GitHub con notas a mano. Sin `CHANGELOG.md` ni imagen en GHCR (hasta la Fase 9).
   - **El repo pasa a público al publicar la v0.1.0,** después de escanear todo el historial con `gitleaks`.
     - El historial se queda como está: a Toni no le importa que se vean su nombre y el email antiguo.
@@ -346,16 +358,31 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - **Configuración:** variables de entorno (`.env`, con `.env.example` en el repo). Nunca subir secretos.
 - **Decisiones:** cada una en `docs/decisions.md`.
 - **Datos verificados** (tests, comprobaciones manuales, versiones, hallazgos): en `docs/evidence.md`.
+- **README sin cifras del proyecto escritas a mano** (número de tests, cobertura, número de ADR, tiempos…), porque se quedan viejas: el README enlaza a `docs/evidence.md`. Las reglas de funcionamiento (30 s, 10 s, 30 días…) y los ejemplos reales sí van.
 
 ---
 
 ## Estado actual
 
-- **Fase actual:** Fase 6 — CI y presentación, en modo plan (rama `phase-6-ci-and-presentation`). Fase 5 cerrada (PR #6 fusionado el 2026-10-28, verificada por Toni).
+- **Fase actual:** Fase 6 — CI y presentación, **construida** en la rama `phase-6-ci-and-presentation` (PR #7, en borrador). Falta que Toni la verifique, pasar el PR a "listo" y fusionarlo. Después: `gitleaks`, release v0.1.0 y repo público. Fase 5 cerrada (PR #6 fusionado el 2026-10-28, verificada por Toni).
+- **Hecho en Fase 6:**
+  - `.github/workflows/ci.yml` con los jobs `lint`, `test` y `stack`, en verde en GitHub;
+  - prueba del rojo: PR #8, cerrado sin fusionar, con los logs del fallo revisados;
+  - `scripts/ci_env.py`;
+  - imágenes fijadas por digest y acciones por SHA, con Dependabot para `github-actions`;
+  - suelo de cobertura del 95 %;
+  - `log_error_verbosity=terse` en PostgreSQL (ADR-044);
+  - README de escaparate con capturas, y licencia MIT;
+  - 267 tests;
+  - ADR-053 a ADR-058.
 - **Cambios descubiertos en Fase 6 (durante la construcción):**
   - **PostgreSQL escribía las URLs en su log de errores.** Al repetir una URL salía `DETAIL: Key (url)=(<URL>) already exists`, y en una CHECK, la fila entera. Lo escribe el propio servidor, no nuestro código. Arreglado con `log_error_verbosity=terse` (ADR-044) y un test.
   - **Docker Hub limita las consultas anónimas a 100 por hora** (cabecera `ratelimit-limit: 100;w=3600`). Inspeccionar digests con `docker buildx imagetools inspect` gasta varias por imagen. Los runners de GitHub descargan sin problema.
   - **`docker compose up --wait` acepta que `migrate` termine con 0** (y falla si `migrate` falla). Verificado con Compose v5.6.1.
+  - **Valkey pasa de 9.1.2 a 9.1.3** al fijar las imágenes: es lo que publicaba `valkey/valkey:9` el 2026-10-28. PostgreSQL sigue en 18.6 y Python en 3.13.18.
+  - **`python:3.13-slim` y `python:3.13.18-slim` tienen digests de índice distintos,** pero las mismas imágenes por plataforma (amd64 y arm64 coinciden). Se fija la pareja exacta etiqueta + digest.
+  - **Los avisos "Failed to save: Unable to reserve cache" de `setup-uv`** aparecen cuando dos jobs intentan guardar la misma caché a la vez. Son inofensivos: uno de los dos la guarda.
+  - **El diagrama Mermaid** no se puede comprobar desde la terminal: GitHub lo dibuja en el navegador. Lo revisa Toni en GitHub.
 - **Hecho en Fase 5:**
   - `GET /api/v1/monitors/{id}/checks` (historial con cursor opaco) y `GET /api/v1/monitors/{id}/stats` (estado actual, uptime, media y p95, recuentos);
   - `pulseops/status.py`, `pulseops/timestamps.py` y `api/cursors.py`;
@@ -456,5 +483,6 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
 - **Siguiente paso:**
-  1. Construir la Fase 6 paso a paso (regla 16): workflow con `lint` → PR en borrador → `test` → `stack` → prueba del rojo → README → documentación.
-  2. Fusionar el PR; escaneo con `gitleaks`; release v0.1.0; repo público.
+  1. Toni verifica la Fase 6 (pestaña Actions, README en GitHub con el diagrama y las capturas) → PR #7 a "listo" → Toni lo fusiona.
+  2. Escaneo de todo el historial con `gitleaks` → release v0.1.0 (etiqueta + notas) → repo público → Toni activa el escaneo de secretos y la protección de `main`.
+  3. Cerrar la Fase 6 en `docs/evidence.md` y aquí. MVP completo.

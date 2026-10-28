@@ -16,6 +16,7 @@ Updated at the close of every phase (and whenever a verified fact changes). It c
 | 3 — Checker | PR #4, 2026-10-27 | 170 passed, 95 % coverage | clean (with `S` rules) | 38 | Checker inside the container against real sites; smoke test 22/22 |
 | 4 — Automatic checks | PR #5, 2026-10-27 | 213 passed, 97 % coverage | clean (with `S` rules) | 45 | Worker in Compose: a new monitor gets its first check in 2 s, then one per interval; worker restarted after `kill -9`; heartbeat fresh |
 | 5 — Status and statistics | PR #6, 2026-10-28 | 266 passed, 97 % coverage | clean (with `S` rules) | 52 | Smoke test 29/29 (first automatic check in 5 s); query measurement on ~893,000 checks |
+| 6 — CI and presentation | PR pending | 267 passed, 97 % coverage | clean (with `S` rules) | 58 | CI green on GitHub (lint, tests, full stack with smoke test); red check seen; failure logs reviewed; Dockerfile built locally from pinned digests |
 
 Reproduce the current numbers:
 
@@ -26,12 +27,14 @@ uv run python scripts/smoke_test.py   # live stack, from outside
 uv run python scripts/measure_queries.py   # query timings and plans (test database)
 uv run ruff check .              # lint, including security rules
 uv run alembic check             # models match migrations
+docker run --rm -v "$PWD:/repo:ro" -w /repo rhysd/actionlint:1.7.7   # lint the CI workflow
+gh run list --branch <branch>    # CI runs and their results
 grep -c "^## ADR-" docs/decisions.md
 ```
 
-## Current test suite (2026-10-28, Phase 5)
+## Current test suite (2026-10-28, Phase 6)
 
-**266 passed in ~19 s**, against real PostgreSQL 18 (separate `pulseops_test` database), real Valkey 9 (logical database 1, throwaway queues) and real local HTTP/HTTPS servers. **Coverage: 97 %** (statements and branches, `uv run pytest --cov`). About 10 s of the run is a single test (`test_scheduler_error_log_never_shows_the_broker_password`): ArdiQ retries a failed connection before giving up, and has no option to shorten that.
+**267 passed in ~22 s** locally and ~24 s in CI, against real PostgreSQL 18 (separate `pulseops_test` database), real Valkey 9 (logical database 1, throwaway queues) and real local HTTP/HTTPS servers. **Coverage: 97 %** (statements and branches, `uv run pytest --cov`). About 10 s of the run is a single test (`test_scheduler_error_log_never_shows_the_broker_password`): ArdiQ retries a failed connection before giving up, and has no option to shorten that.
 
 | File | Tests | What it proves |
 |---|---|---|
@@ -54,6 +57,7 @@ grep -c "^## ADR-" docs/decisions.md
 | `test_retention.py` | 3 | Every expired batch deleted and recent checks kept, the 60 s budget stops between batches and the next run finishes, nothing to delete |
 | `test_migrations.py` | 2 | Downgrade/upgrade round trip; models match migrations |
 | `test_health.py` | 1 | Liveness endpoint |
+| `test_database_config.py` | 1 | PostgreSQL runs with `log_error_verbosity=terse`, so its error log carries no row values (no URLs) |
 
 Not covered, on purpose: the real database session factory (tests substitute their own) and small helpers.
 
@@ -73,6 +77,7 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | Pausing never performs a DNS lookup | `test_pausing_does_not_touch_dns` |
 | An unvalidated URL cannot be stored | `test_repository_refuses_unvalidated_urls`, `test_validated_url_cannot_be_built_directly` |
 | The app database role cannot change the schema | `test_permissions.py::test_app_role_cannot_change_schema` |
+| PostgreSQL's error log never shows the values behind a constraint error (e.g. a duplicate URL) | `test_database_config.py::test_error_log_leaves_out_row_values` |
 | A re-delivered check is a no-op | `test_models.py::test_check_redelivery_is_a_no_op_with_on_conflict` |
 | The checker never connects to a disallowed address, not even after a redirect or a DNS answer that changes (rebinding) | `test_checker.py::test_dns_rebinding_is_blocked`, `test_redirect_to_internal_ip_is_blocked`, `test_one_internal_address_blocks_the_whole_host` |
 | Those SSRF tests really detect the gap | Checked on 2026-10-27: with the validation disabled, all four fail |
@@ -127,6 +132,13 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | 2026-10-28 | Query measurement, see "Query performance" | `/stats` 30 days ~19-20 ms; history page ~1.7 ms; batch delete never scans the whole table |
 | 2026-10-28 | Phase 5 tested by the project owner from Swagger | Stats; history followed with `next_cursor` to the end; forged cursor 422; a failing monitor shown as `down`; paused; `unknown` with the worker stopped |
 | 2026-10-28 11:23 UTC | `https://example.com` from a second, unrelated network (another router) | Still down the same way: connection reset after ~40 ms, with `curl` on the host and with the checker in the container. With two different networks failing alike, the router is ruled out; the cause is upstream (provider) or on the development machine itself. Google up; smoke test 29/29 on the same network |
+| 2026-10-28 | `scripts/ci_env.py`, run locally into a scratch directory | Only the 5 `change-me` values replaced (48 hex characters each); a second run refuses to overwrite; file mode 600; `docker compose config` and the four settings classes load it |
+| 2026-10-28 | CI on PR #7 (GitHub Actions, `ubuntu-24.04`) | All three jobs green. Over 7 green runs: lint 10–30 s, tests 54–74 s, full stack 55–63 s. In CI: 267 passed, smoke test 29/29 with the first automatic check in 3 s, the image built from the pinned digests. Example run: <https://github.com/3fxsty/pulseops/actions/runs/40686832448> |
+| 2026-10-28 | CI red check (PR #8, closed without merging) | One smoke test case broken on purpose: the full stack job failed (28/29, `status 422, expected 400`) and printed the stack's logs; lint and tests stayed green. Run: <https://github.com/3fxsty/pulseops/actions/runs/40684913234> |
+| 2026-10-28 | Review of that failed job's log (896 lines), as it will be public | No generated secret (no standalone 48-hex value), no connection URL, no "password", no API key; the only `***` are GitHub's own token. URLs: tool downloads, the repository, Uvicorn's bind address. IPs: Docker's gateway, `0.0.0.0`, `127.0.0.1`. Paths: the runner's. PostgreSQL: the duplicate-key `ERROR` without `DETAIL`, `STATEMENT` with `$1` placeholders. Worker: public ids only |
+| 2026-10-28 | Dockerfile built locally with the pinned digests; stack recreated | `FROM` lines resolved to the digests; PostgreSQL 18.6, Valkey 9.1.3, Python 3.13.18; 267 passed; smoke test 29/29 |
+| 2026-10-28 | PostgreSQL's log after the test suite and the smoke test, with `log_error_verbosity=terse` | 6 duplicate-key and 9 CHECK errors logged, **0 `DETAIL` lines, 0 lines with a URL** (before the change: 50 and 24 lines carrying URLs) |
+| 2026-10-28 | README screenshots (`docs/images/`) | Only PNG image chunks (`IHDR`, `IDAT`, `gAMA`, `pHYs`, `sRGB`): no text or EXIF metadata. No API key, browser bar or user name in view |
 | 2026-10-26/27 | Phases 0, 1 and 2 tested by the project owner | Swagger `/health` 200 (Phase 0); `psql` checks (Phase 1); manual list (Phase 2) |
 
 ## Library behaviour verified (instead of assumed)
@@ -198,7 +210,7 @@ No measured run of the batch delete in its final form (by `ctid`) contains a seq
 
 | Component | Version |
 |---|---|
-| Python | 3.13.17 |
+| Python | 3.13.17 (host and CI, managed by uv); 3.13.18 in the image |
 | FastAPI | 0.162.0 |
 | SQLAlchemy | 2.1.6 |
 | Alembic | 1.20.1 |
@@ -207,9 +219,12 @@ No measured run of the batch delete in its final form (by `ctid`) contains a seq
 | asyncpg | 0.32.0 |
 | ArdiQ | 1.2.0 |
 | PostgreSQL | 18.6 |
-| Valkey | 9.1.2 |
+| Valkey | 9.1.3 (9.1.2 until Phase 6) |
 | Redis (only to reproduce an ArdiQ issue) | 7.4.12 |
 | Docker / Compose | 29.9.2 / v5.6.1 |
+| uv | 0.13.5 (host, CI and image) |
+| GitHub Actions | `actions/checkout` v7.0.1, `astral-sh/setup-uv` v10.3.2, runner image `ubuntu24/20261025.353` |
+| actionlint | 1.7.7 |
 
 ## Size (2026-10-28, after Phase 5)
 
