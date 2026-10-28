@@ -331,6 +331,14 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 ## Estado actual
 
 - **Fase actual:** Fase 5 — Estado y estadísticas, **en construcción**. El plan está aprobado y las decisiones están en el roadmap. Rama `phase-5-status-and-stats` creada desde `main`. Fase 4 cerrada (PR #5 fusionado el 2026-10-27, verificada por Toni).
+- **Cambios descubiertos en Fase 5 (durante la construcción):**
+  - **Medición** (`scripts/measure_queries.py`, 10 monitores, 892 810 checks):
+    - `/stats` de 30 días tarda unos 20 ms y el historial unos 2 ms por página, así que calcular al vuelo basta;
+    - el borrado con un día atrasado usa el índice BRIN;
+    - en el borrado normal de cada hora, PostgreSQL 18 elige la PK con *skip scan* (una búsqueda por monitor), no el BRIN. En ningún caso recorre la tabla entera. Con miles de monitores debería pasar al BRIN (no verificado). Se deja elegir al planificador.
+  - **El carril `maintenance` exigía bajar `checks` a 30.** Con `checks` en 31 y la limpieza ocupando 1, el planificador no se ejecutaba (comprobado contra Valkey real).
+  - **`pulseops/timestamps.py`:** las funciones de microsegundos salen de `queue/tasks.py`, porque si la API importara ese módulo se crearía la app de ArdiQ, que necesita `BROKER_URL`, y la API ya no la tiene.
+  - **Solo el dueño de una tabla puede ejecutar `ANALYZE`:** el script lo hace como `pulseops_owner`. En producción lo hace el autovacuum.
 - **Hecho en Fase 4:**
   - el worker (`ardiq run pulseops.worker:app`) con un planificador cada 5 s y la tarea `check_monitor`;
   - migraciones `0002` (`next_check_at`) y `0003` (`scheduler_heartbeat`);

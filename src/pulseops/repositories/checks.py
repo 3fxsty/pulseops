@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, func, select, tuple_
+from sqlalchemy import Delete, Select, delete, func, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -65,6 +65,43 @@ async def record_check(
     return stored is not None
 
 
+# The statements are built apart from running them, so that
+# scripts/measure_queries.py can EXPLAIN exactly the SQL the API runs.
+
+
+def history_statement(
+    *, monitor_id: int, limit: int, before: datetime | None = None
+) -> Select:
+    query = select(Check).where(Check.monitor_id == monitor_id)
+    if before is not None:
+        query = query.where(Check.scheduled_at < before)
+    return query.order_by(Check.scheduled_at.desc()).limit(limit)
+
+
+def stats_statement(*, monitor_id: int, period: timedelta) -> Select:
+    since = func.now() - period
+    is_up = Check.is_up.is_(True)
+    return select(
+        since,
+        func.now(),
+        func.count(),
+        func.count().filter(is_up),
+        func.avg(Check.response_time_ms).filter(is_up),
+        func.percentile_cont(0.95).within_group(Check.response_time_ms).filter(is_up),
+    ).where(Check.monitor_id == monitor_id, Check.scheduled_at >= since)
+
+
+def expired_batch_statement(*, retention: timedelta, batch_size: int) -> Delete:
+    expired = (
+        select(Check.monitor_id, Check.scheduled_at)
+        .where(Check.scheduled_at < func.now() - retention)
+        .limit(batch_size)
+    )
+    return delete(Check).where(
+        tuple_(Check.monitor_id, Check.scheduled_at).in_(expired.scalar_subquery())
+    )
+
+
 async def list_checks(
     session: AsyncSession,
     *,
@@ -77,10 +114,7 @@ async def list_checks(
     Unlike OFFSET, a page never shifts when new checks arrive meanwhile, and
     it reads only `limit` rows from the primary key index.
     """
-    query = select(Check).where(Check.monitor_id == monitor_id)
-    if before is not None:
-        query = query.where(Check.scheduled_at < before)
-    query = query.order_by(Check.scheduled_at.desc()).limit(limit)
+    query = history_statement(monitor_id=monitor_id, limit=limit, before=before)
     return (await session.scalars(query)).all()
 
 
@@ -97,18 +131,8 @@ async def check_stats(
     The window ends at the database's now(), the same clock that stamps
     scheduled_at.
     """
-    since = func.now() - period
-    is_up = Check.is_up.is_(True)
-    query = select(
-        since,
-        func.now(),
-        func.count(),
-        func.count().filter(is_up),
-        func.avg(Check.response_time_ms).filter(is_up),
-        func.percentile_cont(0.95).within_group(Check.response_time_ms).filter(is_up),
-    ).where(Check.monitor_id == monitor_id, Check.scheduled_at >= since)
-    row = (await session.execute(query)).one()
-    since_at, until, total, up, avg, p95 = row
+    query = stats_statement(monitor_id=monitor_id, period=period)
+    since_at, until, total, up, avg, p95 = (await session.execute(query)).one()
     return CheckStats(
         since=since_at,
         until=until,
@@ -127,15 +151,7 @@ async def delete_expired_checks(
     Small batches keep each transaction (and its locks) short; the caller
     loops until a batch comes back smaller than `batch_size`.
     """
-    expired = (
-        select(Check.monitor_id, Check.scheduled_at)
-        .where(Check.scheduled_at < func.now() - retention)
-        .limit(batch_size)
-    )
-    result = await session.execute(
-        delete(Check).where(
-            tuple_(Check.monitor_id, Check.scheduled_at).in_(expired.scalar_subquery())
-        )
-    )
+    statement = expired_batch_statement(retention=retention, batch_size=batch_size)
+    result = await session.execute(statement)
     await session.commit()
     return result.rowcount
