@@ -117,7 +117,7 @@ def run(base_url: str, api_key: str) -> list[tuple[bool, str, str]]:
                         "url": f"https://www.google.com/x-{run_id}",
                         "interval_seconds": 10,
                     },
-                    422,
+                    400,
                     "validation_error",
                 ),
                 (
