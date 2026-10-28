@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 import pytest
 from ardiq import Ardiq
 from ardiq.testing import inline
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from pulseops.checker.outcome import up
@@ -106,6 +106,26 @@ async def test_scheduler_tick_survives_a_broken_broker(worker, session, monkeypa
     # Nothing was lost: the monitor is still due for the same slot.
     await session.refresh(monitor)
     assert monitor.next_check_at <= await session.scalar(select(func.now()))
+
+
+async def test_retention_task_deletes_expired_checks(worker, session):
+    monitor = await add_monitor(session)
+    for days in (31, 1):
+        await session.execute(
+            insert(Check).values(
+                monitor_id=monitor.id,
+                scheduled_at=func.now() - timedelta(days=days),
+                is_up=True,
+                status_code=200,
+                response_time_ms=100,
+            )
+        )
+    await session.commit()
+
+    async with inline(worker):
+        assert await tasks.delete_expired() == 1
+
+    assert len(await stored_slots(session, monitor.id)) == 1  # the recent one
 
 
 async def test_scheduler_error_log_never_shows_the_broker_password(

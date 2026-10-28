@@ -1,4 +1,5 @@
-"""The worker's ArdiQ tasks: thin wrappers around pulseops.scheduling."""
+"""The worker's ArdiQ tasks: thin wrappers around pulseops.scheduling and
+pulseops.retention."""
 
 import logging
 from collections.abc import Sequence
@@ -6,8 +7,9 @@ from collections.abc import Sequence
 from pulseops.checker import Checker
 from pulseops.config import get_settings
 from pulseops.db.session import get_engine, get_sessionmaker
-from pulseops.queue.app import CHECKS_LANE, SCHEDULER_LANE, app
+from pulseops.queue.app import CHECKS_LANE, MAINTENANCE_LANE, SCHEDULER_LANE, app
 from pulseops.repositories.scheduling import DueCheck
+from pulseops.retention import MAX_RUN_SECONDS, purge_expired_checks
 from pulseops.scheduling import run_check, schedule_due_checks
 from pulseops.timestamps import from_microseconds, to_microseconds
 
@@ -16,6 +18,10 @@ logger = logging.getLogger(__name__)
 SCHEDULER_EVERY_SECONDS = 5
 # Safety net above the checker's own 10 s deadline.
 CHECK_TASK_TIMEOUT_SECONDS = 30
+RETENTION_EVERY_SECONDS = 3600
+# Safety net above the cleanup's own 60 s budget, which stops between batches;
+# this one would cut a batch short, so it should never be reached.
+RETENTION_TASK_TIMEOUT_SECONDS = MAX_RUN_SECONDS + 30
 
 
 @app.lifespan
@@ -80,4 +86,23 @@ async def schedule_checks() -> int:
         # back). Raising would add a dead letter every 5 s while the database
         # or Valkey is down.
         logger.error("scheduling failed, retrying next tick: %r", error)
+        return 0
+
+
+@app.cron(
+    every=RETENTION_EVERY_SECONDS,
+    coalesce=True,
+    name="delete_expired_checks",
+    # Its own lane (limit 1): a long cleanup never takes the scheduler's slot.
+    priority=MAINTENANCE_LANE,
+    max_retries=0,
+    timeout=RETENTION_TASK_TIMEOUT_SECONDS,
+)
+async def delete_expired() -> int:
+    """Every hour: delete checks older than 30 days, for at most 60 s."""
+    try:
+        return await purge_expired_checks(app.state.sessions)
+    except Exception as error:
+        # Batches already deleted stay deleted; the next run picks up the rest.
+        logger.error("retention failed, retrying next run: %r", error)
         return 0
