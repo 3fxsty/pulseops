@@ -143,9 +143,10 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
   - `SecretStr` en `Settings`, y `hide_input_in_errors=True` en todas las clases de configuración: sin esto, Pydantic muestra el valor (por ejemplo, una API key demasiado corta) en el mensaje de error.
   - Los valores de ejemplo que deban ser secretos son inválidos a propósito (`API_KEY=change-me` es demasiado corta), para que nada arranque con una clave pública.
   - Docker Compose exige los secretos (`${VAR:?}`) en lugar de usar valores por defecto débiles.
-  - Escaneo de secretos con push protection en GitHub (ver "Estado actual").
-- **Dependencias** fijadas con `uv.lock`, con Dependabot activo.
+  - Escaneo de secretos con push protection en GitHub, activo desde el 2026-10-28.
+- **Dependencias** fijadas con `uv.lock`, con Dependabot activo: actualizaciones semanales, alertas de vulnerabilidades y PR de seguridad automáticos.
 - **Docker:** imágenes ligeras y sin ejecutar como root.
+- **Documentación de la API (`/docs`, `/redoc`, `/openapi.json`):** apagada por defecto (`DOCS_ENABLED=false`); solo se enciende en desarrollo desde `.env`.
 - **Cadena de suministro** (ADR-055):
   - las imágenes de Docker se fijan por digest (`imagen:versión@sha256:…`, el del índice multiplataforma), y las acciones de GitHub por SHA, con un comentario de la versión;
   - Dependabot mantiene al día las dependencias, las imágenes y las acciones; los saltos mayores de PostgreSQL se hacen a mano.
@@ -157,6 +158,7 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
   - sin artefactos, y `.env` fuera de la imagen (`.dockerignore`);
   - **los logs de CI serán públicos:** lo que se imprime al fallar (`docker compose logs`) está revisado línea a línea y no lleva secretos ni URLs que no sean las del smoke test;
   - `actionlint` antes de cada cambio del workflow.
+- **`main` protegida con un ruleset** (2026-10-28): solo se cambia por PR, con los tres checks de CI en verde (Lint, Tests, Full stack, y solo valen si los da GitHub Actions); sin borrados, sin `force push` y sin excepciones (lista de bypass vacía). 0 aprobaciones obligatorias, porque GitHub no deja aprobar un PR propio.
 - **SSRF** (PulseOps visita URLs que da el usuario), en `pulseops/security/ssrf.py` (ADR-023):
   - Solo `http` y `https`, sin credenciales en la URL; se acepta cualquier puerto.
   - Si el host es un nombre, se resuelve el DNS de forma async con timeout. Se bloquea si **alguna** IP resultante no está permitida. Si el DNS falla, se acepta: el check lo marcará como `dns_error` y se volverá a validar.
@@ -350,7 +352,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Convenciones
 
-- **Ramas:** una por fase, en inglés (`phase-0-foundations`, `phase-1-data-model`…), fusionadas a `main` por PR.
+- **Ramas:** una por fase, en inglés (`phase-0-foundations`, `phase-1-data-model`…), fusionadas a `main` por PR. Desde el 2026-10-28 lo exige el ruleset de `main`: no se puede subir directamente.
 - **Commits:** Conventional Commits en inglés (`feat:`, `fix:`, `chore:`, `docs:`, `test:`), pequeños y descriptivos, sin líneas de atribución y siempre con el OK previo de Toni (regla 15).
 - **Idioma del proyecto: inglés.** Todo lo que vive en el repo va en inglés: código (nombres, comentarios, docstrings), README, `docs/decisions.md` y cualquier otra documentación, mensajes de commit, ramas, issues y Pull Requests.
 - **Idioma de la conversación: español.** Las explicaciones, preguntas y resúmenes para Toni se dan en español.
@@ -364,7 +366,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** **MVP completo: release v0.1.0** (2026-10-28). Fase 6 cerrada (PR #7 fusionado el 2026-10-28; CI en verde también en `main`). El cierre (`.gitleaksignore`, ajustes de Dependabot y uv, documentación) va en la rama `phase-6-close`. Siguiente: la Fase 7, en modo plan.
+- **Fase actual:** **MVP completo: release v0.1.0** (2026-10-28). El repo es **público**. Fase 6 cerrada (PR #7 y el cierre en el PR #11, fusionados el 2026-10-28; CI en verde en `main`). Siguiente: la Fase 7, en modo plan.
 - **Hecho en Fase 6:**
   - `.github/workflows/ci.yml` con los jobs `lint`, `test` y `stack`, en verde en GitHub;
   - prueba del rojo: PR #8, cerrado sin fusionar, con los logs del fallo revisados;
@@ -379,7 +381,8 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
     - escaneo con `gitleaks` de todo lo que hay en GitHub (ramas y PR): un solo hallazgo, un falso positivo (la clave inventada de los tests), apuntado en `.gitleaksignore`;
     - etiqueta `v0.1.0` y release "v0.1.0 — MVP";
     - Dependabot ignora los saltos menores y mayores de Python (PR #10 cerrado);
-    - la versión de uv sale solo del Dockerfile (CI la lee de ahí) y sube a 0.13.6, lo mismo que proponía el PR #9.
+    - la versión de uv sale solo del Dockerfile (CI la lee de ahí) y sube a 0.13.6, lo mismo que proponía el PR #9. Dependabot cerró el #9 solo al ver uv al día;
+    - Toni pasó el repo a público y activó: escaneo de secretos con push protection, alertas de Dependabot y PR de seguridad automáticos, y el ruleset de `main`. Comprobado por la API.
 - **Cambios descubiertos en Fase 6 (durante la construcción):**
   - **PostgreSQL escribía las URLs en su log de errores.** Al repetir una URL salía `DETAIL: Key (url)=(<URL>) already exists`, y en una CHECK, la fila entera. Lo escribe el propio servidor, no nuestro código. Arreglado con `log_error_verbosity=terse` (ADR-044) y un test.
   - **Docker Hub limita las consultas anónimas a 100 por hora** (cabecera `ratelimit-limit: 100;w=3600`). Inspeccionar digests con `docker buildx imagetools inspect` gasta varias por imagen. Los runners de GitHub descargan sin problema.
@@ -485,14 +488,15 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - cambio de httpx a httpx2;
   - ADR-001 a ADR-008.
 - **Pendiente de decidir:** interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
-- **Pendiente de hacer (Toni):**
-  - pasar el repo a público (desde Settings);
-  - después, activar el escaneo de secretos con push protection y proteger `main` para que exija los tres checks de CI (Lint, Tests, Full stack). En un repo privado del plan Free, GitHub no ofrece ninguna de las dos (comprobado el 2026-10-28: `main` no está protegida).
+- **Repaso de seguridad previo a la Fase 7 (2026-10-29, rama `security-hardening`):**
+  - `SECURITY.md` añadido (versiones 0.1.x, aviso por *Report a vulnerability*, respuesta en 7 días como objetivo).
+  - `DOCS_ENABLED` pasa a `false` por defecto (código y Compose); `.env.example` lo pone a `true` para desarrollo (ADR-027, enmienda).
+  - Aviso en el README: no exponer a internet hasta la Fase 9.
+  - **Pendiente de Toni en Settings:** activar *Private vulnerability reporting* (hoy `enabled: false`) y CodeQL (hoy `not-configured`). Sin lo primero, `SECURITY.md` apunta a un botón que no existe.
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
 - **Siguiente paso:**
-  1. PR de cierre de la Fase 6 (`phase-6-close`) con el OK de Toni, y que lo fusione. Después, comprobar que Dependabot cierra solo el PR #9 (ya no hace falta); si no, cerrarlo a mano.
-  2. Toni: repo público, escaneo de secretos y protección de `main`.
-  3. Empezar la Fase 7 (alertas e incidentes) en modo plan.
+  1. Empezar la Fase 7 (alertas e incidentes) en modo plan.
+  2. El primer commit de su rama lleva lo que quedó sin commit tras el PR #11 (repo público, ruleset y ajustes de seguridad, en este archivo y en `docs/evidence.md`), con el OK de Toni.

@@ -1,6 +1,7 @@
 """Things that must never happen (N5)."""
 
 import logging
+from pathlib import Path
 
 import httpx2
 import pytest
@@ -143,6 +144,25 @@ async def test_docs_can_be_disabled(api_key):
     async with httpx2.AsyncClient(transport=transport, base_url="http://test") as c:
         for path in ["/docs", "/redoc", "/openapi.json"]:
             assert (await c.get(path)).status_code == 404
+
+
+async def test_docs_are_off_by_default(api_key, monkeypatch):
+    # Ignore the developer's .env and environment: only the code default counts.
+    monkeypatch.delenv("DOCS_ENABLED", raising=False)
+    settings = ApiSettings(api_key=api_key, _env_file=None)
+    assert settings.docs_enabled is False
+
+    app = create_app(settings)
+    transport = httpx2.ASGITransport(app=app)
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as c:
+        for path in ["/docs", "/redoc", "/openapi.json"]:
+            assert (await c.get(path)).status_code == 404
+
+
+def test_env_example_and_compose_keep_the_safe_default():
+    # .env.example turns the docs on for development; Compose falls back to off.
+    assert "\nDOCS_ENABLED=true\n" in Path(".env.example").read_text()
+    assert "DOCS_ENABLED:-false}" in Path("docker-compose.yml").read_text()
 
 
 async def test_docs_are_served_when_enabled(client):

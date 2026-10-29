@@ -143,6 +143,9 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | 2026-10-28 | README on GitHub, checked by the project owner | The Mermaid architecture diagram renders correctly |
 | 2026-10-28 | Release v0.1.0 | Annotated tag `v0.1.0` on the merge commit of PR #7 (`8a6e517`), CI green on that commit; GitHub release "v0.1.0 — MVP", marked as latest |
 | 2026-10-28 | uv 0.13.6 (from Dependabot's PR #9), image rebuilt locally | `uv 0.13.6` inside the image; the CI step that reads uv's version from the Dockerfile extracts `0.13.6`, and fails with an error when the line is missing; smoke test 29/29 |
+| 2026-10-28 | Repository settings after going public, read through the GitHub API | `visibility: public`; secret scanning and push protection enabled; Dependabot alerts enabled (`vulnerability-alerts` 204) and automated security fixes enabled. Ruleset `main` (active, on the default branch, empty bypass list): no deletion, no force push, pull request required (0 approvals), and the three CI checks required from GitHub Actions (`Lint (Ruff)`, `Tests (pytest + migrations)`, `Full stack (Compose + smoke test)`) |
+| 2026-10-28 | Public access without signing in | Repository, release `v0.1.0` and the CI workflow page answer 200; the README's CI badge reads "passing" |
+| 2026-10-28 | Dependabot after PR #11 (uv 0.13.6 on `main`) | It closed its own PR #9 on its own: "Looks like astral-sh/uv is up-to-date now, so this is no longer needed." |
 | 2026-10-26/27 | Phases 0, 1 and 2 tested by the project owner | Swagger `/health` 200 (Phase 0); `psql` checks (Phase 1); manual list (Phase 2) |
 
 ## Library behaviour verified (instead of assumed)
@@ -239,11 +242,11 @@ No measured run of the batch delete in its final form (by `ctid`) contains a seq
 
 | Metric | Value | Command |
 |---|---|---|
-| Commits on `main` | 70 | `git rev-list --count main` |
+| Commits on `main` | 75 | `git rev-list --count main` |
 | Non-blank lines in `src/` | 1774 (unchanged in Phase 6) | `find src -name '*.py' \| xargs cat \| grep -cv '^\s*$'` |
 | Non-blank lines in `tests/` | 2093 (2082 after Phase 5) | same, on `tests` |
 | ADRs | 58 | `grep -c "^## ADR-" docs/decisions.md` |
-| Merged PRs | 7 | `gh pr list --state merged` |
+| Merged PRs | 8 | `gh pr list --state merged` |
 
 ## Upstream issues
 

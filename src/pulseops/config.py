@@ -36,8 +36,9 @@ class ApiSettings(BaseSettings):
     )
 
     api_key: SecretStr = Field(min_length=API_KEY_MIN_LENGTH)
-    # Serves /docs, /redoc and /openapi.json.
-    docs_enabled: bool = True
+    # Serves /docs, /redoc and /openapi.json. Off unless asked for: the API map
+    # helps attackers, so a forgotten variable must not expose it (ADR-027).
+    docs_enabled: bool = False
 
 
 class BrokerSettings(BaseSettings):

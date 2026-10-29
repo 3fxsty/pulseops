@@ -612,7 +612,9 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 - **Date:** 2026-10-27 (Phase 2)
 - **Status:** Accepted
 
-**Decision.** Boolean in `ApiSettings`, default `true`. With `false`, `/docs`, `/redoc` and `/openapi.json` are disabled. The production value is decided in Phase 9.
+**Decision.** Boolean in `ApiSettings`. With `false`, `/docs`, `/redoc` and `/openapi.json` are disabled. The production value is decided in Phase 9.
+
+**Amendment (2026-10-29, before Phase 7):** the default is now `false` in the code and in `docker-compose.yml`; `.env.example` sets `DOCS_ENABLED=true` for development. *Why:* the repository is public, and a forgotten or missing variable must fail closed, not expose the API map. *Cost:* a developer who builds the settings by hand must opt in (the test fixtures do).
 
 **Rationale.** The API map helps attackers, and FastAPI's Swagger page loads its assets from an external CDN.
 

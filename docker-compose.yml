@@ -16,7 +16,7 @@ services:
       - "127.0.0.1:8000:8000"
     environment:
       API_KEY: ${API_KEY:?set it in .env}
-      DOCS_ENABLED: ${DOCS_ENABLED:-true}
+      DOCS_ENABLED: ${DOCS_ENABLED:-false}
       DATABASE_URL: postgresql+asyncpg://pulseops_app:${PULSEOPS_APP_PASSWORD:?set it in .env}@postgres:5432/pulseops
       ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
       # No BROKER_URL: the API never uses the queue, so it never gets the

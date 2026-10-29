@@ -9,6 +9,9 @@ Version 0.1.0 is the MVP: an HTTP API with Swagger UI, a worker that runs the ch
 - every design decision is recorded, with the options that were rejected, in [`docs/decisions.md`](docs/decisions.md);
 - every verified fact (test counts, measurements, library behaviour) is recorded, with how to reproduce it, in [`docs/evidence.md`](docs/evidence.md).
 
+> [!WARNING]
+> PulseOps is **not yet meant to be exposed to the internet**. The API listens on `127.0.0.1` only, and the secure deployment (reverse proxy, HTTPS, rate limits) arrives in Phase 9. Until then, run it on your own machine or a trusted network. To report a vulnerability, see [`SECURITY.md`](SECURITY.md).
+
 ![Swagger UI with the PulseOps endpoints](docs/images/swagger.png)
 
 ## Features
@@ -76,7 +79,7 @@ Compose refuses to start without the secrets in `.env`, and the API refuses to s
 Every long-running service restarts on its own after a crash (`restart: unless-stopped`).
 
 - API health check: <http://localhost:8000/health>
-- Swagger UI: <http://localhost:8000/docs>. Click **Authorize** and paste your `API_KEY`.
+- Swagger UI: <http://localhost:8000/docs>. Click **Authorize** and paste your `API_KEY`. The docs are off unless `DOCS_ENABLED=true`, which `.env.example` sets for development.
 
 ## Example
 
