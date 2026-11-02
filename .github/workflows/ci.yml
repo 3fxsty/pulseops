@@ -38,7 +38,7 @@ jobs:
           version=$(sed -nE 's#^FROM ghcr\.io/astral-sh/uv:([0-9.]+)@.*#\1#p' Dockerfile)
           test -n "$version" || { echo "::error::uv's version not found in the Dockerfile"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ steps.uv.outputs.version }}
       # --locked fails if uv.lock is out of date, so CI runs the exact
@@ -62,7 +62,7 @@ jobs:
           version=$(sed -nE 's#^FROM ghcr\.io/astral-sh/uv:([0-9.]+)@.*#\1#p' Dockerfile)
           test -n "$version" || { echo "::error::uv's version not found in the Dockerfile"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ steps.uv.outputs.version }}
       - name: Create a throwaway .env with random secrets
@@ -101,7 +101,7 @@ jobs:
           version=$(sed -nE 's#^FROM ghcr\.io/astral-sh/uv:([0-9.]+)@.*#\1#p' Dockerfile)
           test -n "$version" || { echo "::error::uv's version not found in the Dockerfile"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           version: ${{ steps.uv.outputs.version }}
       - name: Create a throwaway .env with random secrets
