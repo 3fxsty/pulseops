@@ -32,9 +32,9 @@ gh run list --branch <branch>    # CI runs and their results
 grep -c "^## ADR-" docs/decisions.md
 ```
 
-## Current test suite (2026-10-28, Phase 6)
+## Current test suite (2026-11-03, after the pre-Phase 7 security review)
 
-**267 passed in ~22 s** locally and ~24 s in CI, against real PostgreSQL 18 (separate `pulseops_test` database), real Valkey 9 (logical database 1, throwaway queues) and real local HTTP/HTTPS servers. **Coverage: 97 %** (statements and branches, `uv run pytest --cov`). About 10 s of the run is a single test (`test_scheduler_error_log_never_shows_the_broker_password`): ArdiQ retries a failed connection before giving up, and has no option to shorten that.
+**269 passed in ~23 s** locally and ~23 s in CI (run [41673905304](https://github.com/3fxsty/pulseops/actions/runs/41673905304) on `main`), against real PostgreSQL 18 (separate `pulseops_test` database), real Valkey 9 (logical database 1, throwaway queues) and real local HTTP/HTTPS servers. **Coverage: 97 %** (statements and branches, `uv run pytest --cov`). About 10 s of the run is a single test (`test_scheduler_error_log_never_shows_the_broker_password`): ArdiQ retries a failed connection before giving up, and has no option to shorten that.
 
 | File | Tests | What it proves |
 |---|---|---|
@@ -44,7 +44,7 @@ grep -c "^## ADR-" docs/decisions.md
 | `test_url_normalization.py` | 25 | Every normalization rule, credential rejection, length limits |
 | `test_models.py` | 22 | Every database constraint, UUID v7, cascade, `ON CONFLICT DO NOTHING` idempotency |
 | `test_api_checks.py` | 20 | History (exact fields, every check once in order, no shift when a check arrives mid-pagination, forged cursor, a cursor never reaches another monitor, `limit` bounds) and stats (healthy, down with rounding, no data, paused, stale → `unknown`, period window, unknown period), 404/401 on both, API error kinds match the database |
-| `test_api_security.py` | 15 | "Must never happen" guarantees (see below) |
+| `test_api_security.py` | 17 | "Must never happen" guarantees (see below) |
 | `test_cursors.py` | 14 | Exact microsecond round trip, opaque URL-safe cursor, 12 forged cursors rejected |
 | `test_scheduling.py` | 12 | Scheduler tick (enqueue then commit, failed enqueue loses nothing, heartbeat moves on empty ticks and not on failed ones), check run (stores the outcome, no connection held during the check, deleted/paused skipped, URL and `error_detail` never logged), `hide_parameters` |
 | `test_checks_repository.py` | 12 | Storing a check (idempotent, monitor deleted meanwhile), keyset history, latest check, stats (latency of up checks only, p95, period, no data), batch delete (recent kept, one batch at a time, an address pointing at a recent check deletes nothing) |
@@ -73,6 +73,7 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | A too-short API key stops startup without being printed | `test_short_api_key_refuses_to_start_without_leaking_it` |
 | Missing or wrong API key → 401 | `test_missing_or_wrong_api_key_is_401` |
 | No CORS headers are sent | `test_no_cors_headers` |
+| The API docs (`/docs`, `/redoc`, `/openapi.json`) are off unless `DOCS_ENABLED=true`; Compose falls back to off, and only `.env.example` turns them on for development | `test_docs_are_off_by_default`, `test_env_example_and_compose_keep_the_safe_default` (the first ignores the developer's `.env`) |
 | PATCH cannot bypass SSRF | `test_api_monitors.py::test_patch_url_goes_through_ssrf_check` |
 | Pausing never performs a DNS lookup | `test_pausing_does_not_touch_dns` |
 | An unvalidated URL cannot be stored | `test_repository_refuses_unvalidated_urls`, `test_validated_url_cannot_be_built_directly` |
@@ -146,6 +147,10 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | 2026-10-28 | Repository settings after going public, read through the GitHub API | `visibility: public`; secret scanning and push protection enabled; Dependabot alerts enabled (`vulnerability-alerts` 204) and automated security fixes enabled. Ruleset `main` (active, on the default branch, empty bypass list): no deletion, no force push, pull request required (0 approvals), and the three CI checks required from GitHub Actions (`Lint (Ruff)`, `Tests (pytest + migrations)`, `Full stack (Compose + smoke test)`) |
 | 2026-10-28 | Public access without signing in | Repository, release `v0.1.0` and the CI workflow page answer 200; the README's CI badge reads "passing" |
 | 2026-10-28 | Dependabot after PR #11 (uv 0.13.6 on `main`) | It closed its own PR #9 on its own: "Looks like astral-sh/uv is up-to-date now, so this is no longer needed." |
+| 2026-10-29 | Repository security settings, read through the GitHub API before Phase 7 | Public; Dependabot alerts and security updates, secret scanning and push protection enabled; ruleset `main` unchanged (three required CI checks, empty bypass list). Missing at first: private vulnerability reporting (`enabled: false`) and CodeQL (`not-configured`). After the project owner enabled them: `enabled: true` and CodeQL default setup `configured` (Python and Actions), not a required check |
+| 2026-11-03 | Security alerts on the public repository, through the GitHub API | Open alerts: CodeQL 0 (latest analyses of `main`: Python and Actions, 0 results each), Dependabot 0, secret scanning 0 |
+| 2026-11-03 | ArdiQ #9 and #11, reproduced against the test Valkey with a throwaway script, on 1.2.0 (`uv run --with 'ardiq==1.2.0'`, lock untouched) and on 1.2.1 | Second burst `app.run()` on the same app: 1.2.0 ran 1 of 2 tasks and left `queue_size` 1; 1.2.1 ran both, queue empty. Custom `task_id` enqueued again after it finished, while the new run is pending: 1.2.0 said `complete` and returned the old result; 1.2.1 says `running` and returns `None` |
+| 2026-11-03 | ArdiQ 1.2.1 on `main` (Dependabot PR #14) | 269 passed (97.14 % coverage) locally and in CI; smoke test 29/29 in CI. ArdiQ's v1.2.1 README and `docker-compose.yml` publish Redis on `127.0.0.1` (#10) |
 | 2026-10-26/27 | Phases 0, 1 and 2 tested by the project owner | Swagger `/health` 200 (Phase 0); `psql` checks (Phase 1); manual list (Phase 2) |
 
 ## Library behaviour verified (instead of assumed)
@@ -174,7 +179,9 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | PostgreSQL does not keep a CTE's order in `UPDATE … RETURNING` | Claimed monitors are sorted in Python (a test was flaky before) |
 | A claim with `FOR UPDATE` blocks inserting a check for that monitor (foreign key share lock); `FOR NO KEY UPDATE` does not | The claim uses `FOR NO KEY UPDATE SKIP LOCKED` (ADR-039) |
 | `ALTER TABLE … ADD COLUMN … NOT NULL DEFAULT now()` does not rewrite the table in PostgreSQL 18 (same file node, `atthasmissing = true`) | Migration `0002` is cheap on a large `monitors` table |
-| ArdiQ 1.2.0 deduplicates a custom `task_id` only while the task exists; after it finishes, the same id runs again | `ON CONFLICT DO NOTHING` is still needed (ADR-041) |
+| ArdiQ 1.2.0 and 1.2.1 deduplicate a custom `task_id` only while the task exists; after it finishes, the same id runs again | `ON CONFLICT DO NOTHING` is still needed (ADR-041) |
+| ArdiQ 1.2.1 drops a finished task's result as soon as its custom `task_id` is enqueued again (1.2.0 kept returning the old result until the new run ended) | No effect on PulseOps: it never reads task results; outcomes live in PostgreSQL |
+| ArdiQ 1.2.1 lets the same app run a second burst worker (1.2.0 returned at once and left the queue untouched) | No effect on PulseOps today: no code or test reuses a burst app |
 | ArdiQ 1.2.0 `expire_ms` drops a task not started in time (status `not_found`) | Stale checks are dropped (ADR-041) |
 | ArdiQ's `BrokerError`/`ArdiqError` messages do not include the Redis password (`timed out`, `Password authentication failed`) | Safe to log the scheduler's error |
 | ArdiQ has no connection timeout option: an unreachable broker fails after ~16 s, a wrong password after ~9.5 s | The password-log test takes ~10 s |
@@ -217,7 +224,7 @@ Other shapes, same script:
 
 No measured run of the batch delete in its final form (by `ctid`) contains a sequential scan.
 
-## Verified versions (2026-10-28)
+## Verified versions (2026-11-03)
 
 | Component | Version |
 |---|---|
@@ -225,16 +232,17 @@ No measured run of the batch delete in its final form (by `ctid`) contains a seq
 | FastAPI | 0.162.0 |
 | SQLAlchemy | 2.1.6 |
 | Alembic | 1.20.1 |
-| Pydantic / pydantic-settings | 2.14.1 / 2.16.1 |
+| Pydantic / pydantic-settings | 2.14.1 / 2.16.2 |
 | httpx2 | 2.16.0 |
 | asyncpg | 0.32.0 |
-| ArdiQ | 1.2.0 |
+| ArdiQ / msgpack | 1.2.1 / 1.2.4 (1.2.0 until PR #14) |
 | PostgreSQL | 18.6 |
 | Valkey | 9.1.3 (9.1.2 until Phase 6) |
 | Redis (only to reproduce an ArdiQ issue) | 7.4.12 |
 | Docker / Compose | 29.9.2 / v5.6.1 |
 | uv | 0.13.6 in CI and the image (CI reads it from the Dockerfile); 0.13.5 on the development host |
-| GitHub Actions | `actions/checkout` v7.0.1, `astral-sh/setup-uv` v10.3.2, runner image `ubuntu24/20261025.353` |
+| GitHub Actions | `actions/checkout` v7.0.1, `astral-sh/setup-uv` v10.3.3 (PR #13), runner image `ubuntu24/20261025.353` |
+| pytest / Ruff | 9.2.0 / 0.17.3 |
 | actionlint | 1.7.7 |
 | gitleaks | 8.30.1 |
 
@@ -254,6 +262,6 @@ Problems found in libraries, reported by the project owner. Each row is added on
 
 | Library | Issue | Status |
 |---|---|---|
-| ArdiQ | [#9](https://github.com/17tayyy/ardiq/issues/9) — Docs: custom `task_id` deduplication only lasts while the task exists | Open (2026-10-28) |
-| ArdiQ | [#10](https://github.com/17tayyy/ardiq/issues/10) — Security: examples publish Redis on all interfaces (0.0.0.0) without a password | Open (2026-10-28) |
-| ArdiQ | [#11](https://github.com/17tayyy/ardiq/issues/11) — A second `app.run()` in burst mode on the same instance exits without processing the queue | Open (2026-10-28) |
+| ArdiQ | [#9](https://github.com/17tayyy/ardiq/issues/9) — Docs: custom `task_id` deduplication only lasts while the task exists | Fixed in ArdiQ 1.2.1 (closed 2026-10-28); verified 2026-11-03 |
+| ArdiQ | [#10](https://github.com/17tayyy/ardiq/issues/10) — Security: examples publish Redis on all interfaces (0.0.0.0) without a password | Fixed in ArdiQ 1.2.1 (closed 2026-10-28); verified 2026-11-03 |
+| ArdiQ | [#11](https://github.com/17tayyy/ardiq/issues/11) — A second `app.run()` in burst mode on the same instance exits without processing the queue | Fixed in ArdiQ 1.2.1 (closed 2026-10-28); verified 2026-11-03 |
