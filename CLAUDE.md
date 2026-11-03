@@ -93,7 +93,7 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 | Configuración | pydantic-settings | Lee y valida las variables de entorno; secretos como `SecretStr` (ADR-013) |
 | Tests | pytest | Tests automáticos |
 | Lint y formato | Ruff | Revisión y formato de código |
-| CI/CD | GitHub Actions | Lint, tests y el stack entero con smoke test en cada PR y en cada push a `main` (ADR-053) |
+| CI/CD | GitHub Actions | Lint, tests y el stack entero con smoke test en cada PR y en cada push a `main` (ADR-053); CodeQL (default setup) analiza Python y Actions |
 | Contenedores | Docker + Docker Compose | Levantar todos los servicios juntos |
 | Interfaz | Swagger (MVP) → **pendiente**: Grafana y/o HTMX | Ver el estado |
 | Alertas | Bot de Telegram (post-MVP) | Avisar de caídas |
@@ -101,7 +101,7 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 | Servidor | VPS (Hetzner) | Producción |
 
 ### Notas sobre ArdiQ
-- Cola de tareas con núcleo en Rust, async, sobre Redis Streams + Lua. Versión de referencia: **1.2.0** (oct 2026). Docs: https://ardiq.bytay.dev · Repo: https://github.com/17tayyy/ardiq
+- Cola de tareas con núcleo en Rust, async, sobre Redis Streams + Lua. Versión en uso: **1.2.1** (desde el PR #14, 2026-11-03). Docs: https://ardiq.bytay.dev · Repo: https://github.com/17tayyy/ardiq
 - **El autor es amigo de Toni**: si algo falla o falta, se puede preguntar directamente y abrir issues/PRs en su repo (suma al portfolio).
 - Elegido frente a Celery, Taskiq y ARQ por: async nativo, poca memoria, cron/reintentos/dead letter queue incluidos y soporte directo del autor.
 - **Aislar ArdiQ en su propio módulo** (p. ej. `pulseops/queue/`) para poder sustituirlo sin tocar el resto.
@@ -112,9 +112,10 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
   - `expire_ms` descarta de verdad las tareas que no empiezan a tiempo;
   - `ardiq.testing.inline` ignora los retrasos y `expire_ms`;
   - no hay opción de timeout de conexión: un broker inalcanzable tarda unos 16 s en fallar.
-- **Hallazgos para el autor**, abiertos por Toni como issues [#9](https://github.com/17tayyy/ardiq/issues/9), [#10](https://github.com/17tayyy/ardiq/issues/10) (los ejemplos de ArdiQ publican Redis en `0.0.0.0` sin contraseña) y [#11](https://github.com/17tayyy/ardiq/issues/11); apuntados en `docs/evidence.md`, "Upstream issues":
-  - la guía de `task_id` no aclara que el deduplicado acaba al terminar la tarea;
-  - en modo `burst`, un segundo `app.run()` sobre la misma instancia no procesa la cola. Reproducido con Redis 7.4.12 y Valkey 9.1.2.
+- **Hallazgos para el autor**, abiertos por Toni como issues [#9](https://github.com/17tayyy/ardiq/issues/9), [#10](https://github.com/17tayyy/ardiq/issues/10) y [#11](https://github.com/17tayyy/ardiq/issues/11). **Los tres están arreglados en ArdiQ 1.2.1** (cerrados el 2026-10-28; las notas de la versión citan a Toni). Comprobado el 2026-11-03 contra Valkey real, con 1.2.0 y 1.2.1 lado a lado (`docs/evidence.md`, "Upstream issues"):
+  - #9: la guía ya aclara que el deduplicado de `task_id` dura mientras la tarea existe (eso **no cambia**: sigue haciendo falta `ON CONFLICT DO NOTHING`). Además, al reencolar un id terminado se borra su resultado viejo. A PulseOps no le afecta: no lee resultados de tareas.
+  - #10: los ejemplos publican Redis en `127.0.0.1`.
+  - #11: un segundo `app.run()` en modo `burst` sobre la misma instancia ya procesa la cola.
 
 ### Valkey vs Redis
 ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que debería funcionar con ambos, pero no está probado oficialmente. **Plan:** en la Fase 0, levantar Valkey en Docker Compose y ejecutar `ardiq doctor`. Si pasa → Valkey. Si falla → Redis (cambio de una línea) y avisar al autor.
@@ -144,6 +145,8 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
   - Los valores de ejemplo que deban ser secretos son inválidos a propósito (`API_KEY=change-me` es demasiado corta), para que nada arranque con una clave pública.
   - Docker Compose exige los secretos (`${VAR:?}`) en lugar de usar valores por defecto débiles.
   - Escaneo de secretos con push protection en GitHub, activo desde el 2026-10-28.
+- **Avisos de vulnerabilidades:** `SECURITY.md` pide usar *Report a vulnerability* (Private vulnerability reporting, activo desde el 2026-10-29), nunca una issue pública. Objetivo de respuesta: acuse en 7 días.
+- **CodeQL** (default setup, Python y Actions), activo desde el 2026-10-29. **No es un check obligatorio** del ruleset (decisión de Toni, 2026-10-29).
 - **Dependencias** fijadas con `uv.lock`, con Dependabot activo: actualizaciones semanales, alertas de vulnerabilidades y PR de seguridad automáticos.
 - **Docker:** imágenes ligeras y sin ejecutar como root.
 - **Documentación de la API (`/docs`, `/redoc`, `/openapi.json`):** apagada por defecto (`DOCS_ENABLED=false`); solo se enciende en desarrollo desde `.env`.
@@ -366,7 +369,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** **MVP completo: release v0.1.0** (2026-10-28). El repo es **público**. Fase 6 cerrada (PR #7 y el cierre en el PR #11, fusionados el 2026-10-28; CI en verde en `main`). Siguiente: la Fase 7, en modo plan.
+- **Fase actual:** **MVP completo: release v0.1.0** (2026-10-28). El repo es **público**. Fase 6 cerrada (PR #7 y el cierre en el PR #11, fusionados el 2026-10-28; CI en verde en `main`). Después: repaso de seguridad (PR #12) y dependencias de Dependabot (PR #13 y #14). Siguiente: la Fase 7, en modo plan.
 - **Hecho en Fase 6:**
   - `.github/workflows/ci.yml` con los jobs `lint`, `test` y `stack`, en verde en GitHub;
   - prueba del rojo: PR #8, cerrado sin fusionar, con los logs del fallo revisados;
@@ -488,15 +491,16 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - cambio de httpx a httpx2;
   - ADR-001 a ADR-008.
 - **Pendiente de decidir:** interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
-- **Repaso de seguridad previo a la Fase 7 (2026-10-29, rama `security-hardening`):**
+- **Repaso de seguridad previo a la Fase 7 (PR #12, fusionado):**
   - `SECURITY.md` añadido (versiones 0.1.x, aviso por *Report a vulnerability*, respuesta en 7 días como objetivo).
   - `DOCS_ENABLED` pasa a `false` por defecto (código y Compose); `.env.example` lo pone a `true` para desarrollo (ADR-027, enmienda).
   - Aviso en el README: no exponer a internet hasta la Fase 9.
-  - **Pendiente de Toni en Settings:** activar *Private vulnerability reporting* (hoy `enabled: false`) y CodeQL (hoy `not-configured`). Sin lo primero, `SECURITY.md` apunta a un botón que no existe.
+  - Toni activó *Private vulnerability reporting* y CodeQL (default setup); comprobado por la API.
+  - 269 tests.
+  - El 2026-11-03: 0 alertas abiertas de CodeQL, Dependabot y secret scanning.
+- **Dependabot tras el repaso (2026-11-03):** PR #13 (`setup-uv` 10.3.3) y PR #14 (ArdiQ 1.2.1, pydantic-settings 2.16.2, pytest 9.2.0, Ruff 0.17.3), fusionados con CI en verde.
 - **Notas para más adelante:**
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:**
-  1. Empezar la Fase 7 (alertas e incidentes) en modo plan.
-  2. El primer commit de su rama lleva lo que quedó sin commit tras el PR #11 (repo público, ruleset y ajustes de seguridad, en este archivo y en `docs/evidence.md`), con el OK de Toni.
+- **Siguiente paso:** empezar la Fase 7 (alertas e incidentes) en modo plan.
