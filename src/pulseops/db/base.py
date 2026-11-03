@@ -5,9 +5,11 @@ from sqlalchemy.orm import DeclarativeBase
 
 # Predictable constraint names, so later migrations can refer to them
 # (e.g. turning uq_monitors_url into a per-owner constraint in Phase 10).
+# Unique constraints name every column, so a composite one does not read as
+# unique on its first column alone.
 NAMING_CONVENTION = {
     "ix": "ix_%(table_name)s_%(column_0_name)s",
-    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "uq": "uq_%(table_name)s_%(column_0_N_name)s",
     "ck": "ck_%(table_name)s_%(constraint_name)s",
     "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
     "pk": "pk_%(table_name)s",
