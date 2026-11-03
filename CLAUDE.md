@@ -420,6 +420,12 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 ## Estado actual
 
 - **Fase actual:** **Fase 7 — Alertas e incidentes**, en construcción en la rama `phase-7-alerts-and-incidents`. Plan aprobado por Toni el 2026-11-03, con ADR-059 a ADR-070.
+- **Cambios descubiertos en Fase 7 (durante la construcción):**
+  - **Convención de nombres:** los `uq_` llevan ahora todas sus columnas (`column_0_N_name`). Si no, el único de `(monitor_id, started_at)` se llamaría `uq_incidents_monitor_id`, como si `monitor_id` fuera único. Los nombres de una sola columna no cambian (`alembic check` limpio).
+  - **`with_for_update(key_share=True)` de SQLAlchemy da `FOR NO KEY UPDATE`;** para `FOR KEY SHARE` hace falta además `read=True`. Hay un test que lo fija.
+  - **El *autoflush* adelanta los errores:** cualquier sentencia guarda antes los cambios pendientes del ORM. Al cambiar la URL, cerrar el incidente *después* de tocar el monitor hacía saltar el `uq_monitors_url` fuera de `_commit` → un 500 en vez del 409 (lo detectó `test_patch_url_to_an_existing_one_is_a_conflict`). Ahora se cierra el incidente antes de tocar los campos.
+  - **`store_check` lee el monitor con `FOR KEY SHARE`** antes de insertar: un monitor borrado ya no provoca un error de clave foránea que haya que capturar. `record_check` ya no hace commit ni captura ese error.
+  - **Un test de concurrencia que no demostraba nada:** sin candado, las dos tareas acababan en orden y el test seguía pasando. Ahora cada `store_check` espera entre evaluar y hacer commit (con `monkeypatch`), y sin candado el test falla, como debe. Comprobado rompiendo el código a propósito: sin el candado, sin la regla del check tardío, sin `not_before`, con la pausa sin candado y con `FOR UPDATE`, su test falla en cada caso.
 - **Antes:** MVP completo con la release v0.1.0 (2026-10-28) y el repo **público**. Fase 6 cerrada (PR #7 y PR #11). Después vinieron el repaso de seguridad (PR #12), las dependencias de Dependabot (PR #13 y #14) y la documentación de ArdiQ 1.2.1 (PR #15).
 - **Hecho en Fase 6:**
   - `.github/workflows/ci.yml` con los jobs `lint`, `test` y `stack`, en verde en GitHub;
@@ -556,9 +562,10 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
 - **Siguiente paso** (Fase 7, en pasos pequeños y con cada commit enseñado antes):
   1. ✅ ADRs y este archivo.
-  2. Migración `0004` (`incidents`, `notifications`) y modelos, revisada a mano.
-  3. `pulseops/incidents.py` (la regla pura).
-  4. Repositorios y `run_check` (candado, check tardío), y cierre al pausar o cambiar la URL.
+  2. ✅ Migración `0004` (`incidents`, `notifications`) y modelos, revisada a mano.
+  3. ✅ `pulseops/incidents.py` (la regla pura).
+  4. ✅ Repositorios y `run_check` (candado, check tardío), y cierre al pausar o cambiar la URL.
+     - **Pendiente para el paso 6:** la retención de los incidentes cerrados hace más de 1 año (ADR-062), en el cron de limpieza.
   5. `pulseops/alerts/` (`Notifier`, `TelegramNotifier`, mensaje y comando de prueba).
   6. Cron `deliver_notifications`, carril `alerts` y `AlertSettings`.
   7. API de incidentes, `open_incident` y `/health/scheduler`.

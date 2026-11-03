@@ -1,11 +1,12 @@
 from collections.abc import Mapping, Sequence
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import Row, Select, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pulseops.db.models import Monitor
+from pulseops.repositories.incidents import close_open_incident, lock_monitor_incidents
 from pulseops.security.validation import ValidatedUrl
 
 URL_UNIQUE_CONSTRAINT = "uq_monitors_url"
@@ -66,6 +67,24 @@ async def get_monitor_by_id(session: AsyncSession, monitor_id: int) -> Monitor |
     return await session.get(Monitor, monitor_id)
 
 
+def monitor_for_check_statement(monitor_id: int) -> Select:
+    # FOR KEY SHARE: the lock a foreign key check takes anyway. It stops the
+    # monitor from being deleted until commit, but never conflicts with the
+    # scheduler's FOR NO KEY UPDATE claim.
+    return (
+        select(Monitor.is_active, Monitor.interval_seconds)
+        .where(Monitor.id == monitor_id)
+        .with_for_update(read=True, key_share=True)
+    )
+
+
+async def get_monitor_for_check(session: AsyncSession, monitor_id: int) -> Row | None:
+    """is_active and interval_seconds, with the monitor kept from deletion
+    until commit. None if it was already deleted."""
+    result = await session.execute(monitor_for_check_statement(monitor_id))
+    return result.one_or_none()
+
+
 async def list_monitors(
     session: AsyncSession,
     *,
@@ -92,7 +111,16 @@ async def update_monitor(
         field: _require_validated(value) if field == "url" else value
         for field, value in changes.items()
     }
-    reschedule = _needs_check_now(monitor, values)
+    changed = {f for f, v in values.items() if getattr(monitor, f) != v}
+    reschedule = _needs_check_now(changed, values)
+    resolution = _ends_open_incident(changed, values)
+    if resolution:
+        # The same lock as the incident evaluation (ADR-061), so the two never
+        # interleave. Both run before the monitor's own changes: a statement
+        # flushes pending changes first, and a duplicate URL must surface in
+        # _commit (a 409), where the rollback also undoes this.
+        await lock_monitor_incidents(session, monitor.id)
+        await close_open_incident(session, monitor.id, resolution)
     for field, value in values.items():
         setattr(monitor, field, value)
     if reschedule:
@@ -101,15 +129,23 @@ async def update_monitor(
     return monitor
 
 
-def _needs_check_now(monitor: Monitor, values: Mapping[str, object]) -> bool:
+def _needs_check_now(changed: set[str], values: Mapping[str, object]) -> bool:
     """A new URL or interval, or a reactivation, gets checked right away.
 
     Otherwise going from a 1-day interval to 30 s would still wait for the old
     slot, possibly a day away.
     """
-    changed = {f for f, v in values.items() if getattr(monitor, f) != v}
     reactivated = "is_active" in changed and values["is_active"]
     return bool(changed & {"url", "interval_seconds"}) or reactivated
+
+
+def _ends_open_incident(changed: set[str], values: Mapping[str, object]) -> str | None:
+    """Pausing or a new URL ends the open incident, without a recovery (ADR-062)."""
+    if "is_active" in changed and not values["is_active"]:
+        return "paused"
+    if "url" in changed:
+        return "monitor_changed"
+    return None
 
 
 async def delete_monitor(session: AsyncSession, monitor: Monitor) -> None:

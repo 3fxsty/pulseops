@@ -201,6 +201,9 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | `gitleaks` (`generic-api-key`) flags any "api key" variable with a varied value, a made-up test key included | The test key's finding is listed in `.gitleaksignore` after review |
 | `gh pr edit` (GitHub CLI) fails on this repository with a GraphQL error about the deprecated classic Projects | PR titles and bodies edited through the REST API (`gh api -X PATCH repos/…/pulls/N`) |
 | Docker Hub limits anonymous registry requests to 100 per hour per address (`ratelimit-limit: 100;w=3600`); `docker buildx imagetools inspect` makes several per image | Digests looked up sparingly; GitHub-hosted runners pull without hitting it |
+| SQLAlchemy 2.1: `with_for_update(key_share=True)` renders `FOR NO KEY UPDATE`; `FOR KEY SHARE` needs `read=True` as well | `store_check` reads the monitor with `read=True, key_share=True`; `test_the_monitor_row_lock_is_key_share` |
+| SQLAlchemy autoflush: running any statement first flushes the session's pending ORM changes, so a unique violation of those changes is raised by that statement, not by the later commit | When a URL changes, the open incident is closed before the monitor's fields are touched, so a duplicate URL is still a 409 (`test_patch_url_to_an_existing_one_is_a_conflict` caught the 500) |
+| PostgreSQL 18: `pulseops_app` can take transaction-level advisory locks (`pg_advisory_xact_lock(int, int)`); the lock shows in `pg_locks` and is released on commit | Incident evaluation takes turns per monitor (ADR-061); `test_app_role_can_take_transaction_advisory_locks` |
 
 ## Query performance (2026-10-28)
 
