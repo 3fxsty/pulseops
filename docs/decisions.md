@@ -1332,3 +1332,324 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 - **Rewriting history** (`git filter-repo`) to remove the old email: it changes every SHA and breaks the links from pull requests to their commits.
 
 **Reversibility.** Hard for the tag and for going public: what is published may be cached or copied. Easy for the license choice going forward.
+
+---
+
+## ADR-059 — Phase 7 scope
+
+- **Date:** 2026-11-03 (Phase 7)
+- **Status:** Accepted
+
+**Context.** Since v0.1.0, PulseOps records every check, but nobody learns about an outage unless they look at the API.
+
+**Decision.** Phase 7 builds four things:
+- **Incidents:** consecutive failures of a monitor grouped into one outage, with a start and an end.
+- **Telegram alerts** when an incident opens and when it is resolved.
+- **Anti-spam:** no alert for a single failed check, nor a stream of alerts for a site that keeps going up and down.
+- **Watching the watchman:** a way to tell from outside that the scheduler has stopped.
+
+**Left out, noted in the roadmap:**
+- **Expected status codes per monitor:** they touch the checker, a `checks` constraint and the API. Meanwhile, a monitor that answers 401 on purpose can be paused.
+- **Reminders** ("still down after 1 h").
+- **Bot commands** (`/status`): the bot would have to receive messages, which opens a way in from outside.
+- **Other channels** (email, Discord). The `Notifier` interface (ADR-064) leaves room for them.
+
+**Weak point.** With alerts, a false "down" (a 401 or 403 that is expected) becomes noisier.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-060 — When an incident opens and closes
+
+- **Date:** 2026-11-03 (Phase 7)
+- **Status:** Accepted
+
+**Context.** Alerting on the first failed check would page for every network hiccup. A site that alternates up and down must not open and close incidents all day (flapping).
+
+**Decision.** A pure function, `pulseops/incidents.py`, decides from a monitor's latest checks:
+- **Open** after **2 consecutive failed checks**, when no incident is open.
+- **Close** after **2 consecutive successful checks**, when one is open.
+- **`started_at`** is the `scheduled_at` of the **first** failed check of the streak, and **`resolved_at`** that of the first successful one. The incident's duration is therefore the real outage, not the time it took to confirm it.
+- **A gap breaks a streak:** two checks more than 2 × interval + 60 s apart (for example, with the worker stopped) are not consecutive. This is the staleness rule of ADR-047, so "no data" means the same everywhere.
+- **A streak never reaches back past the previous incident's `resolved_at`.** It only matters when an incident was closed by pausing the monitor or changing its URL (ADR-062): checks of the old configuration never start a new incident.
+- **Global constants**, not per monitor.
+
+**Rejected.**
+- **One failure:** fastest alert, but noisy.
+- **Three failures:** calmer, but slower (with a 30 s interval, 1.5 min instead of 1 min).
+- **Thresholds per monitor:** a new column and more API for no current need. They can be added later.
+- **Confirmation by time** ("down for 2 minutes"): better for long intervals, more complex.
+
+**Weak point.** With a 1 h interval, the alert arrives 2 h after the first failure.
+
+**Reversibility.** The numbers are easy (constants). The meaning of `started_at` and `resolved_at` is hard: it is stored in every incident.
+
+---
+
+## ADR-061 — Incident detection in the check's own transaction, one monitor at a time
+
+- **Date:** 2026-11-03 (Phase 7)
+- **Status:** Accepted
+
+**Context.** Checks arrive through a queue that delivers at least once, possibly late (retries) and, for the same monitor, possibly at the same time.
+
+**Decision.** `run_check` stores the check and evaluates incidents in **one transaction**, in this order:
+1. **Take a transaction-level advisory lock for the monitor:** `pg_advisory_xact_lock(<incidents namespace>, monitor_id)`.
+   - **What it is:** a PostgreSQL lock on a number, not on a row. It is released on commit or rollback.
+   - **Why:** two checks of the same monitor are evaluated one after the other, never at the same time (requested by the project owner). It locks no row, so it never blocks the scheduler (which claims the monitor's row with `FOR NO KEY UPDATE SKIP LOCKED`) nor other monitors.
+   - **Two keys** (a fixed namespace for incidents, plus the monitor id), so it cannot collide with other advisory locks in the future.
+   - **Pausing a monitor or changing its URL takes the same lock** (ADR-062), so it can never interleave with an evaluation.
+2. **Insert the check** (`ON CONFLICT DO NOTHING`, as before). `record_check` no longer commits on its own.
+3. **Evaluate only if the check was really inserted, and is the newest one stored for that monitor:**
+   - **a re-delivered check** (not inserted) is not counted twice;
+   - **a late check** (older than the newest stored) is kept in the history, but never opens or closes an incident (requested by the project owner). The decision is always made with the most recent checks by `scheduled_at`;
+   - **a paused or deleted monitor** is not evaluated.
+4. **Open or close the incident, and write its pending notification** (ADR-063).
+5. **One commit:** an incident never exists without its notification, and vice versa.
+
+**Rejected.**
+- **A cron that scans recent checks:** adds delay and repeated scans.
+- **A PostgreSQL trigger:** logic hidden in the database, harder to test, and created by the schema owner.
+- **`SELECT … FOR UPDATE` on the monitor's row:** it would make the scheduler skip that monitor while a check is being stored.
+
+**Weak point.** Every check runs one more short query (the latest checks, through the primary key), and a second check of the same monitor waits a few milliseconds for the first.
+
+**Reversibility.** Easy: internal code.
+
+---
+
+## ADR-062 — The `incidents` table
+
+- **Date:** 2026-11-03 (Phase 7)
+- **Status:** Accepted
+
+**Decision.** Migration `0004`, reviewed by hand:
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | integer, identity | Internal key, never exposed |
+| `public_id` | UUID v7, unique | The id in the API, as for monitors (ADR-010) |
+| `monitor_id` | FK → `monitors.id`, `ON DELETE CASCADE` | Deleting a monitor deletes its incidents |
+| `started_at` | timestamptz | ADR-060 |
+| `resolved_at` | timestamptz, null while open | ADR-060 |
+| `error_kind` | varchar(32), the closed list of `checks` | Why the first failed check failed |
+| `status_code` | smallint, nullable | That check's HTTP status, if any |
+| `resolution` | `recovered`, `paused` or `monitor_changed`; null while open | How it ended |
+
+- **Constraints:**
+  - **one open incident per monitor:** a partial unique index on `monitor_id WHERE resolved_at IS NULL`. PostgreSQL itself refuses a second one, whatever the code does;
+  - **unique `(monitor_id, started_at)`:** a monitor cannot have two incidents starting at the same check. It is also the index for a monitor's incident history;
+  - **an index on `(started_at, public_id)`** for the list across monitors (ADR-069);
+  - **CHECKs:** `resolved_at >= started_at`; `resolved_at` and `resolution` are both null or both set; `error_kind` and `resolution` in their closed lists.
+- **Closing without a recovery:**
+  - **pausing** the monitor closes its open incident with `resolution = 'paused'`;
+  - **changing its URL** closes it with `'monitor_changed'`;
+  - in both cases `resolved_at` is the time of the change, and **no "resolved" alert is sent**: the site did not recover.
+- **Retention:** the hourly cleanup (ADR-051) also deletes incidents **resolved more than 1 year ago**. Open incidents are never deleted. They are small (one row per outage) and are the long-term history, while checks only last 30 days.
+
+**Rejected.**
+- **Keeping incidents 30 days, like checks:** loses the outage history that matters most.
+- **Keeping them forever:** unbounded growth for little value.
+- **Deriving incidents from checks at query time:** no place to hang alert state, and the checks are deleted after 30 days.
+
+**Weak point.** A schema is the most expensive thing to change once it holds data.
+
+**Reversibility.** Hard.
+
+---
+
+## ADR-063 — Notification outbox and delivery
+
+- **Date:** 2026-11-03 (Phase 7)
+- **Status:** Accepted
+
+**Context.** If PulseOps sent the alert directly while storing the check, a Telegram failure would lose it, and a retried task would send it twice.
+
+**Decision.** The **outbox pattern:** the alert is first written to the database, in the same transaction as the incident (ADR-061), and delivered later.
+- **Table `notifications`** (migration `0004`):
+  - `incident_id` (FK, `ON DELETE CASCADE`), `kind` (`opened` or `resolved`), unique together: one alert of each kind per incident;
+  - `status`, a closed list: `pending`, `sent`, `failed`, `skipped`;
+  - `attempts`, `created_at`, `next_attempt_at`, `finished_at`;
+  - a partial index on `next_attempt_at WHERE status = 'pending'`.
+  - A `resolved` alert is only written for `resolution = 'recovered'`.
+- **Cron `deliver_notifications` every 5 s,** on its own lane (ADR-070), in small batches:
+  - **Claim, then send, then record.** The claim uses `FOR UPDATE SKIP LOCKED`, increments `attempts` and pushes `next_attempt_at` 60 s ahead (a lease), then commits. **No database connection is held while Telegram answers,** as for checks (ADR-041). If the worker dies mid-send, the lease expires and another run picks it up.
+  - **A send always ends well inside its lease** (requested by the project owner). Otherwise a slow send could let another worker claim the same alert while the first one is still sending it:
+    - **one total deadline of 10 s per send** (`asyncio.timeout`), as for checks (ADR-033). httpx2's own timeouts apply per phase (connect, read…) and could add up to more than that;
+    - **each alert is claimed just before it is sent,** one at a time, so every send starts with a full 60 s lease. Claiming a batch first would let the lease of the last alerts run out while the earlier ones are sent;
+    - **tested:** the lease is at least 3 times the deadline, and a send that hangs is cut at the deadline.
+  - **Retries with a growing wait:** 10 s, 20 s, 40 s… capped at 1 h. A Telegram 429 schedules the next attempt after its `retry_after`.
+  - **Giving up** (requested by the project owner): after **20 attempts** or **24 h** since it was created, whichever comes first, the alert becomes `failed` and the worker logs an ERROR with ids, kind and attempts only, never the token or a URL. No endless retries.
+  - **Order within an incident** (requested by the project owner): a `resolved` alert is not sent while the `opened` one is still `pending`. Once the `opened` one has ended (`sent`, `failed` or `skipped`), the `resolved` one may go: it carries the start time and the duration, so it is understandable on its own.
+  - **Without a bot configured,** pending alerts become `skipped` (ADR-066).
+- **Delivery guarantee: at least once.** A duplicate needs Telegram to accept a message and PulseOps to fail right before recording it.
+
+**Rejected.**
+- **Sending from the check task:** a Telegram failure loses the alert, and a retried task sends it twice.
+- **Alert state as columns on `incidents`:** enough for one channel, but users and channels (Phase 10) would need a table.
+- **One ArdiQ task per alert:** ties storing a check to Valkey once more.
+- **Holding the row lock during the send:** simpler, but a database connection would wait on Telegram for up to 10 s.
+
+**Weak point.** Up to 5 s of extra delay, one more table and one more cron.
+
+**Reversibility.** Medium: it is schema.
+
+---
+
+## ADR-064 — Telegram through its Bot API, with httpx2
+
+- **Date:** 2026-11-03 (Phase 7)
+- **Status:** Accepted
+
+**Decision.**
+- **One call, `sendMessage`, made with httpx2** (already a dependency), behind a small `Notifier` interface in `pulseops/alerts/`, so other channels can be added without touching the rest.
+- **The Bot API address is fixed** in the code (`https://api.telegram.org`, requested by the project owner). No environment variable or setting can change it.
+  - Tests give `TelegramNotifier` a fake httpx2 transport (`MockTransport`). The fake Telegram lives only in the tests.
+- **Client:** `trust_env=False` (proxy variables ignored), TLS always verified, no redirects followed, and one total deadline of 10 s per send (`asyncio.timeout`, ADR-063).
+- **Plain text** (no `parse_mode`): a monitor's name cannot break the message's format or inject links.
+- **The token travels in the URL path** (`/bot<token>/sendMessage`), so:
+  - the `httpx2` and `httpcore2` loggers stay at WARNING (ADR-044);
+  - errors are logged by type and HTTP status only, never with the exception's message (it may contain the URL) or Telegram's answer;
+  - tests prove the token never reaches the logs or exception messages.
+- **Only outgoing calls:** the bot never receives messages, so nothing listens for Telegram.
+
+**Rejected.**
+- **`python-telegram-bot` or `aiogram`:** frameworks built for receiving messages, with many more dependencies, and logs that could print the URL with the token.
+- **`apprise`** (many channels in one library): a large dependency for one channel.
+
+**Weak point.** If Telegram changes its API, PulseOps maintains the call itself (the Bot API is very stable).
+
+**Reversibility.** Easy, thanks to `Notifier`.
+
+---
+
+## ADR-065 — What an alert says
+
+- **Date:** 2026-11-03 (Phase 7)
+- **Status:** Accepted
+
+**Decision.**
+- **An alert carries:** the monitor's name and `public_id`, the `error_kind` and the HTTP status (if any), the start time and, when resolved, the duration. Times in UTC.
+- **Never the monitor's URL nor the `error_detail`:** the rule of ADR-044, extended to third parties. A URL may carry tokens, and Telegram is an outside service that keeps the messages (they are not end-to-end encrypted).
+
+**Rejected.**
+- **The full URL:** more context on the phone, but it would send tokens to a third party.
+- **The host only:** rarely sensitive (tokens usually go in the path or query), but not never.
+
+**Weak point.** Less context on the phone: the monitor is recognised by its name.
+
+**Reversibility.** Easy for future alerts; what was sent cannot be taken back.
+
+---
+
+## ADR-066 — Alert settings and the bot token
+
+- **Date:** 2026-11-03 (Phase 7)
+- **Status:** Accepted
+
+**Decision.**
+- **`AlertSettings`, used by the worker only:** `TELEGRAM_BOT_TOKEN` (`SecretStr`) and `TELEGRAM_CHAT_ID`, with `hide_input_in_errors=True`. **The API never gets the token,** like the Valkey password (ADR-043).
+- **Optional:** without them, incidents are still recorded, and the worker logs once at start-up that alerts are off. CI and development work without a bot.
+  - **Both or neither:** one without the other stops the worker at start-up.
+  - **Format checked** (a token is `<digits>:<characters>`, a chat id is a number or an `@name`) without echoing the value.
+- **Without a token, pending alerts become `skipped`,** instead of waiting (requested by the project owner). When a bot is configured later, old alerts do not all arrive at once.
+- **`python -m pulseops.alerts test`** sends a test message from inside the worker's container, like the checker's command (ADR-037).
+- **`.env.example`** leaves both empty, so alerts are off until someone sets them on purpose.
+
+**Rejected.** **Making them required:** safer against forgetting them, but it would break CI and development.
+
+**Weak point.** Forgetting the token silently means no alerts; the start-up log line is the only reminder.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-067 — Anti-spam beyond the confirmation
+
+- **Date:** 2026-11-03 (Phase 7)
+- **Status:** Accepted
+
+**Decision.**
+- **One message per event** (opened, resolved).
+- **Telegram's rate limits are respected:** a 429 waits for its `retry_after` (ADR-063).
+- **No reminders** while an incident stays open.
+
+**Rejected for now.**
+- **Grouping each run's alerts in one message** ("3 monitors down: A, B, C").
+- **"The problem is us":** when most monitors fail at the same time, the cause is probably PulseOps's own network, and one global alert would be better than one per monitor.
+- **Why not now:** with few monitors the extra complexity does not pay off. **Noted for Phase 9,** where a network failure of the server could fire many alerts at once.
+
+**Weak point.** If PulseOps's own network fails, there is one alert per monitor.
+
+**Reversibility.** Easy.
+
+---
+
+## ADR-068 — `GET /health/scheduler`
+
+- **Date:** 2026-11-03 (Phase 7)
+- **Status:** Accepted
+
+**Context.** A dead worker cannot alert about itself. Since Phase 4, `scheduler_heartbeat.last_success_at` (ADR-045) says when the scheduler last completed a tick.
+
+**Decision.**
+- **`/health` stays as it is:** a liveness probe, used by Docker's healthcheck and by `docker compose up --wait` in CI.
+- **A new route, `GET /health/scheduler`, without the API key,** for an outside monitor to poll:
+  - **200 `{"status": "ok"}`** if the last tick is less than 60 s old (12 ticks), measured with the database's clock;
+  - **503 `{"status": "stale"}`** if it is older, or the scheduler never ran;
+  - **503 `{"status": "unavailable"}`** if the database cannot be reached, without any error detail;
+  - **no timestamp in the answer:** it is worth nothing to someone without the key.
+- **Who watches it:** an outside uptime monitor or a dead man's switch, set up in Phase 9. Until then the API only listens on `127.0.0.1`, so in this phase the route exists and is tested.
+- **Noted for Phase 9:** without the API key and reading the database, it needs the reverse proxy's request rate limit.
+
+**Rejected.**
+- **Folding it into `/health`:** Docker would mark the API unhealthy because of another service, and CI would fail until the first tick.
+- **The API sending the alert itself:** it would need the bot token.
+- **The scheduler pinging an outside dead man's switch on every tick:** an outside dependency, better decided in Phase 9.
+
+**Weak point.** Until Phase 9 nothing polls it automatically.
+
+**Reversibility.** Hard: outside monitors will point at this route.
+
+---
+
+## ADR-069 — Incidents API
+
+- **Date:** 2026-11-03 (Phase 7)
+- **Status:** Accepted
+
+**Decision.** With the API key and RFC 9457 errors, like every `/api/v1` route:
+
+| Route | Response |
+|---|---|
+| `GET /api/v1/monitors/{id}/incidents?limit=50&cursor=…` | One monitor's incidents, newest first: `id` (`public_id`), `started_at`, `resolved_at`, `error_kind`, `status_code`, `resolution`. 404 `monitor_not_found` for an unknown monitor |
+| `GET /api/v1/incidents?state=open&limit=50&cursor=…` | Incidents across monitors, newest first, each with the monitor's `id` and `name` |
+| `GET /api/v1/monitors/{id}/stats` | Adds `open_incident` (`id`, `started_at`, `error_kind`, `status_code`), `null` when there is none |
+
+- **`state` is a closed list:** `open` or `resolved` (requested by the project owner). Any other value is a 422; without it, both.
+- **`limit`** 1–100, 50 by default, as for checks.
+- **Cursor:** opaque and strictly decoded, like the history's (ADR-050), with its own prefix. Its key is `(started_at, public_id)`, because two monitors can have incidents starting at the same microsecond. A forged cursor is a 422 `invalid_cursor` that does not echo it.
+- **The internal ids** (`id` of the incident and of the monitor) are never exposed.
+
+**Rejected.** **Only the per-monitor route:** knowing "what is down right now" would mean asking every monitor.
+
+**Weak point.** Two more routes to keep stable.
+
+**Reversibility.** Hard: routes and response shapes are a public contract.
+
+---
+
+## ADR-070 — An `alerts` lane on the worker
+
+- **Date:** 2026-11-03 (Phase 7)
+- **Status:** Accepted
+
+**Decision.**
+- **A new lane, `alerts`, limited to 1,** for `deliver_notifications`. Slow deliveries never take the slots of checks, cleanup or the scheduler.
+- **`checks` drops from 30 to 29,** so checks (29) + cleanup (1) + alerts (1) always leave at least one of the 32 slots for the scheduler.
+- **Verified against Valkey,** as for the `maintenance` lane (ADR-051).
+
+**Weak point.** One slot fewer for checks; 29 at a time is still far above current needs.
+
+**Reversibility.** Easy.
