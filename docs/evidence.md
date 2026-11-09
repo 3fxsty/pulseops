@@ -17,6 +17,7 @@ Updated at the close of every phase (and whenever a verified fact changes). It c
 | 4 — Automatic checks | PR #5, 2026-10-27 | 213 passed, 97 % coverage | clean (with `S` rules) | 45 | Worker in Compose: a new monitor gets its first check in 2 s, then one per interval; worker restarted after `kill -9`; heartbeat fresh |
 | 5 — Status and statistics | PR #6, 2026-10-28 | 266 passed, 97 % coverage | clean (with `S` rules) | 52 | Smoke test 29/29 (first automatic check in 5 s); query measurement on ~893,000 checks |
 | 6 — CI and presentation | PR #7, 2026-10-28 | 267 passed, 97 % coverage | clean (with `S` rules) | 58 | CI green on GitHub (lint, tests, full stack with smoke test), also on `main` after the merge; red check seen; failure logs reviewed; Dockerfile built locally from pinned digests; `gitleaks` clean; **release v0.1.0 (MVP)** |
+| 7 — Alerts and incidents | PR #18, 2026-11-09 | 469 passed, 98 % coverage | clean (with `S` rules) | 70 | With a real Telegram bot: test message, DOWN and RECOVERED delivered at the first attempt and without the URL (confirmed by the owner), 400 and 403 seen; `/health/scheduler` 503 with the worker stopped and 200 again; no token, URL or password in any service's log; smoke test 37/37 |
 
 Reproduce the current numbers:
 
@@ -32,31 +33,37 @@ gh run list --branch <branch>    # CI runs and their results
 grep -c "^## ADR-" docs/decisions.md
 ```
 
-## Current test suite (2026-11-03, after the pre-Phase 7 security review)
+## Current test suite (2026-11-09, at the close of Phase 7)
 
-**269 passed in ~23 s** locally and ~23 s in CI (run [41673905304](https://github.com/3fxsty/pulseops/actions/runs/41673905304) on `main`), against real PostgreSQL 18 (separate `pulseops_test` database), real Valkey 9 (logical database 1, throwaway queues) and real local HTTP/HTTPS servers. **Coverage: 97 %** (statements and branches, `uv run pytest --cov`). About 10 s of the run is a single test (`test_scheduler_error_log_never_shows_the_broker_password`): ArdiQ retries a failed connection before giving up, and has no option to shorten that.
+**469 passed in ~33 s** locally (269 before Phase 7), against real PostgreSQL 18 (separate `pulseops_test` database), real Valkey 9 (logical database 1, throwaway queues) and real local HTTP/HTTPS servers. **Coverage: 98.29 %** (statements and branches, `uv run pytest --cov`; floor 95 %). Telegram is never contacted: its tests use a fake transport (`MockTransport`). About 10 s of the run is a single test (`test_scheduler_error_log_never_shows_the_broker_password`): ArdiQ retries a failed connection before giving up, and has no option to shorten that.
 
 | File | Tests | What it proves |
 |---|---|---|
+| `test_alerts.py` | 54 | Alert settings (off without both values, an empty value means unset, one without the other or a malformed token or chat id stops start-up without echoing it); the Telegram client (plain text to the fixed Bot API address, a 429 waits for `retry_after` or the header, 5xx and network failures are temporary, any other answer is permanent and says why, redirects never followed, a hanging send cut at its deadline, the token never in an error or a log line, proxy variables ignored); the message text (both kinds, UTC, short durations, a line break in the name cannot fake a line, no room for the URL or `error_detail`); the test command |
 | `test_ssrf.py` | 45 | The full SSRF address table, DNS behaviour (own thread pool, failures, timeouts), disguised internal URLs, `ValidatedUrl` guard |
 | `test_api_monitors.py` | 31 | Every endpoint, pagination, PATCH rules, 404/409/422 paths, cascade delete, repository guard |
+| `test_delivery.py` | 30 | The outbox: a due alert is sent and marked; DOWN before RECOVERED (RECOVERED waits while DOWN is pending and goes once DOWN has failed for good); an old DOWN is sent while its incident is open and skipped once it is over, a RECOVERED is always sent; waits grow up to 1 h, a 429 waits for `retry_after`, a permanent failure fails at once; giving up after 20 attempts or 24 h from the first attempt, never scheduling a retry past that window, and after 20 claims without an answer; skipped without a bot; two deliveries never claim the same alert; the lease outlasts a send with room to spare; a run stops at its time budget; the URL never reaches the alert or the logs |
+| `test_cursors.py` | 30 | History and incident cursors: exact microsecond round trip, opaque and URL-safe, the incident cursor fits its 72-character limit, the two kinds never mix, 25 forged cursors rejected |
 | `test_checker.py` | 27 | Up/down against real local servers: 200, 404/500/503, timeout, body never downloaded, User-Agent, refused connection, DNS failure, address fallback, redirects (limit, loop, other scheme), SSRF at connect time (literal IP, redirect to internal IP, DNS rebinding, mixed answers), proxy variables ignored, URLs never logged, TLS (valid, wrong name, expired, untrusted CA), CLI |
 | `test_url_normalization.py` | 25 | Every normalization rule, credential rejection, length limits |
+| `test_incident_models.py` | 25 | Every constraint of `incidents` and `notifications`: one open incident per monitor, one incident per start, `resolved_at` and `resolution` together and never before the start, closed lists of values, one alert of each kind per incident, a finish time exactly when finished; both deleted with their monitor |
 | `test_models.py` | 22 | Every database constraint, UUID v7, cascade, `ON CONFLICT DO NOTHING` idempotency |
+| `test_incidents.py` | 22 | The pure rule: 2 failures open an incident at the first one, 2 successes close it at the first one, a gap breaks a streak, a streak never reaches back past the previous incident, a site that alternates never opens one, flapping during an incident keeps it open |
+| `test_api_incidents.py` | 21 | Both incident lists (exact fields, newest first with every incident once, `state` filter and 422 on an unknown one, incidents of two monitors starting at the same moment, a foreign or forged cursor is a 422 that does not echo it, a cursor never reaches another monitor, `limit` bounds, 404/401, no internal ids) and `open_incident` in `/stats` |
 | `test_api_checks.py` | 20 | History (exact fields, every check once in order, no shift when a check arrives mid-pagination, forged cursor, a cursor never reaches another monitor, `limit` bounds) and stats (healthy, down with rounding, no data, paused, stale → `unknown`, period window, unknown period), 404/401 on both, API error kinds match the database |
-| `test_api_security.py` | 17 | "Must never happen" guarantees (see below) |
-| `test_cursors.py` | 14 | Exact microsecond round trip, opaque URL-safe cursor, 12 forged cursors rejected |
+| `test_incident_tracking.py` | 19 | Detection while a check is stored: opening and resolving with their alerts in the same commit; a redelivered or late check decides nothing; paused and deleted monitors; checks of one monitor take turns (advisory lock) and two simultaneous failures open one incident; the scheduler is never blocked (`FOR KEY SHARE`); pausing and a new URL end the incident without a "resolved" alert, other edits and a rejected URL keep it open, older checks never reopen it, pausing waits for a check being evaluated; the log line says when an incident opens |
+| `test_api_security.py` | 18 | "Must never happen" guarantees (see below) |
 | `test_scheduling.py` | 12 | Scheduler tick (enqueue then commit, failed enqueue loses nothing, heartbeat moves on empty ticks and not on failed ones), check run (stores the outcome, no connection held during the check, deleted/paused skipped, URL and `error_detail` never logged), `hide_parameters` |
-| `test_checks_repository.py` | 12 | Storing a check (idempotent, monitor deleted meanwhile), keyset history, latest check, stats (latency of up checks only, p95, period, no data), batch delete (recent kept, one batch at a time, an address pointing at a recent check deletes nothing) |
+| `test_checks_repository.py` | 11 | Storing a check (idempotent), keyset history, latest check, stats (latency of up checks only, p95, period, no data), batch delete (recent kept, one batch at a time, an address pointing at a recent check deletes nothing). A deleted monitor is now covered in `test_incident_tracking.py` |
+| `test_queue_tasks.py` | 10 | ArdiQ wrappers in memory (`inline`): microsecond round trip, check task, scheduler tick, broken broker, retention task, error log without the broker password (real Valkey), and the alert delivery task (sends due alerts, says once that alerts are off and skips them, never logs the token, its timeout covers a whole run) |
 | `test_scheduling_repository.py` | 9 | Claiming due monitors: due/not due, inactive, missed slots keep the rhythm, batch size, `updated_at` untouched, two schedulers never claim the same monitor, a claimed monitor still accepts checks, a rolled-back claim is retried with the same slot |
 | `test_monitor_rescheduling.py` | 8 | Create, new URL, new interval and reactivation bring the next check forward; rename, pause and same values do not |
-| `test_queue_tasks.py` | 6 | ArdiQ wrappers in memory (`inline`): microsecond round trip, check task, scheduler tick, broken broker, retention task, error log without the broker password (real Valkey) |
+| `test_health.py` | 7 | Liveness endpoint; `/health/scheduler` without the API key: `ok` up to 60 s after the last tick and `stale` after it or if it never ran, `unavailable` when the database is unreachable or hangs (cut at its deadline), always exactly `{"status": …}` with `Cache-Control: no-store` |
+| `test_permissions.py` | 6 | The app role can read and write rows (incidents and alerts included) and take transaction-level advisory locks, but cannot CREATE, ALTER or DROP |
 | `test_status.py` | 5 | Current status: up/down, paused, no checks, the staleness boundary (180 s fresh, 181 s stale for a 60 s interval) |
-| `test_queue_broker.py` | 5 | ArdiQ against real Valkey: id dedup while waiting, no dedup after finishing, `expire_ms` drops stale tasks, 16-digit integers intact, the scheduler keeps its slot while checks (30) and cleanup (1) are busy |
-| `test_permissions.py` | 4 | The app role can read and write rows, but cannot CREATE, ALTER or DROP |
-| `test_retention.py` | 3 | Every expired batch deleted and recent checks kept, the 60 s budget stops between batches and the next run finishes, nothing to delete |
+| `test_queue_broker.py` | 5 | ArdiQ against real Valkey: id dedup while waiting, no dedup after finishing, `expire_ms` drops stale tasks, 16-digit integers intact, the scheduler keeps its slot while checks (29), cleanup (1) and alerts (1) are busy |
+| `test_retention.py` | 4 | Every expired batch deleted and recent checks kept, the 60 s budget stops between batches and the next run finishes, nothing to delete; incidents resolved over a year ago deleted with their alerts, recent and open ones kept |
 | `test_migrations.py` | 2 | Downgrade/upgrade round trip; models match migrations |
-| `test_health.py` | 1 | Liveness endpoint |
 | `test_database_config.py` | 1 | PostgreSQL runs with `log_error_verbosity=terse`, so its error log carries no row values (no URLs) |
 
 Not covered, on purpose: the real database session factory (tests substitute their own) and small helpers.
@@ -96,13 +103,30 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | The heartbeat only moves when a tick commits | `test_an_empty_tick_still_moves_the_heartbeat`, `test_a_failed_enqueue_does_not_move_the_heartbeat` |
 | Those Phase 4 tests really detect the gap | Checked on 2026-10-27/28 by breaking the code on purpose: holding the session during the check, logging the URL, a stronger lock, an error carrying the password and stamping the heartbeat before enqueueing all made the matching test fail |
 | Paging the history never skips or repeats a check, even when one arrives meanwhile | `test_api_checks.py::test_new_checks_do_not_shift_the_next_page`, `test_history_pages_cover_every_check_once_in_order` |
-| A forged cursor is a 422 that does not echo it, and never reaches another monitor | `test_forged_cursor_is_422_without_echoing_it`, `test_a_cursor_never_reaches_another_monitor`, `test_cursors.py::test_forged_cursors_are_rejected` |
+| A forged cursor is a 422 that does not echo it, and never reaches another monitor (history and incidents) | `test_forged_cursor_is_422_without_echoing_it`, `test_a_cursor_never_reaches_another_monitor` (in `test_api_checks.py` and `test_api_incidents.py`), `test_a_foreign_cursor_is_422_without_echoing_it`, `test_cursors.py::test_forged_cursors_are_rejected`, `test_forged_incident_cursors_are_rejected`, `test_the_two_kinds_of_cursor_never_mix` |
 | No data is reported as `null` uptime, never 0 % or 100 % | `test_stats_without_data_say_so` |
 | A stale last check is not reported as current | `test_stale_last_check_is_unknown`, `test_status.py::test_a_stale_check_is_unknown` |
 | Retention never deletes a recent check, not even through a reused row address | `test_delete_expired_checks_keeps_recent_ones`, `test_an_address_reused_by_a_recent_check_is_never_deleted` (it fails without the date recheck) |
 | A cleanup run stops at its time budget | `test_retention.py::test_stops_at_the_time_limit_and_finishes_next_run` |
-| The scheduler keeps a slot while checks and cleanup are busy | `test_queue_broker.py::test_scheduler_keeps_its_slot_while_checks_and_cleanup_are_busy` (real Valkey). Checked on 2026-10-28: with `checks` limited to 31, the scheduler did not run within 3 s |
+| The scheduler keeps a slot while checks, cleanup and alerts are busy | `test_queue_broker.py::test_scheduler_keeps_its_slot_while_every_other_lane_is_busy` (real Valkey). Checked on 2026-10-28 with two lanes (`checks` at 31: the scheduler did not run within 3 s) and in Phase 7 with three (`checks` at 30: no tick ran) |
 | Tests never touch development data | Separate `pulseops_test` database. Checked manually on 2026-10-26: dev `monitors` count stayed 0 after a full test run |
+| One incident per outage, even with simultaneous, late or redelivered checks | `test_incident_tracking.py::test_checks_of_one_monitor_take_turns`, `test_two_failures_at_the_same_time_open_one_incident`, `test_a_late_check_is_stored_but_decides_nothing`, `test_a_redelivered_check_is_not_counted_twice`; at most one open incident per monitor in the database (`test_only_one_open_incident_per_monitor`) |
+| A site that alternates never raises alerts | `test_incidents.py::test_a_site_that_alternates_never_opens_an_incident`, `test_flapping_during_an_incident_keeps_it_open` |
+| Storing a check never blocks the scheduler | `test_the_scheduler_is_not_blocked_by_a_check_being_stored`, `test_the_monitor_row_lock_is_key_share` |
+| Pausing or a new URL ends the incident without a "recovered" alert, and never races a check being evaluated | `test_pausing_ends_the_incident_without_a_resolved_alert`, `test_a_new_url_ends_it_as_monitor_changed`, `test_pausing_waits_for_a_check_being_evaluated`, `test_checks_from_before_a_url_change_never_reopen_it` |
+| Those incident tests really detect the gap | Checked on 2026-11-03 by breaking the code on purpose: without the advisory lock, without the late-check rule, without `not_before`, pausing without the lock and reading the monitor with `FOR UPDATE`, the matching test failed every time |
+| Alerts never carry the monitor URL or `error_detail` | `test_alerts.py::test_an_alert_has_no_room_for_the_url_or_the_error_detail`, `test_delivery.py::test_the_url_never_reaches_the_alert_or_the_logs`. Seen with the real bot on 2026-11-09 (see "Manual verifications") |
+| The bot token never reaches a log line or an error message | `test_the_token_never_reaches_the_logs`, `test_a_connection_error_never_carries_the_token`, `test_cli_reports_a_failed_send_without_the_token`, `test_delivery_task_never_logs_the_token`, `test_importing_alerts_alone_silences_httpx2` (fresh interpreter; fails with the guard removed) |
+| The API never gets the bot token | `test_api_security.py::test_only_the_worker_gets_the_bot_token` (reads `docker-compose.yml`) |
+| Invalid alert settings stop start-up without being printed | `test_a_malformed_token_is_refused_without_echoing_it`, `test_one_setting_without_the_other_stops_start_up`, `test_cli_refuses_invalid_settings_without_echoing_them` |
+| Alerts only go to the fixed Bot API address: no proxy, no redirect | `test_sends_plain_text_to_the_fixed_bot_api_address`, `test_proxy_variables_are_ignored` (inspects the real client), `test_redirects_are_never_followed` |
+| A name cannot fake a line in an alert | `test_a_line_break_in_the_name_cannot_fake_a_line` |
+| A send always ends well inside its lease | `test_a_send_that_hangs_is_cut_at_the_deadline`, `test_the_lease_outlasts_a_send_with_room_to_spare` (lease at least 3 × the 10 s deadline) |
+| RECOVERED never goes before its DOWN | `test_down_then_recovered_in_order`, `test_recovered_waits_while_down_is_pending` |
+| Two deliveries never send the same alert | `test_two_deliveries_never_claim_the_same_alert` |
+| Retries always stop | `test_it_gives_up_after_20_attempts`, `test_retries_stop_24_hours_after_the_first_attempt`, `test_no_retry_is_scheduled_past_the_window`, `test_an_alert_claimed_over_and_over_gives_up`; a permanent failure stops at once (`test_a_permanent_failure_fails_at_once_and_says_why`) |
+| Configuring the bot later sends no backlog of old alerts | `test_without_a_bot_pending_alerts_are_skipped` |
+| `/health/scheduler` never serves an old "ok" from a cache, and answers in time when the database hangs | `test_health.py` (`Cache-Control: no-store` on every answer), `test_a_database_that_hangs_is_cut_at_the_deadline` |
 
 ## Manual verifications
 
@@ -151,6 +175,20 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | 2026-11-03 | Security alerts on the public repository, through the GitHub API | Open alerts: CodeQL 0 (latest analyses of `main`: Python and Actions, 0 results each), Dependabot 0, secret scanning 0 |
 | 2026-11-03 | ArdiQ #9 and #11, reproduced against the test Valkey with a throwaway script, on 1.2.0 (`uv run --with 'ardiq==1.2.0'`, lock untouched) and on 1.2.1 | Second burst `app.run()` on the same app: 1.2.0 ran 1 of 2 tasks and left `queue_size` 1; 1.2.1 ran both, queue empty. Custom `task_id` enqueued again after it finished, while the new run is pending: 1.2.0 said `complete` and returned the old result; 1.2.1 says `running` and returns `None` |
 | 2026-11-03 | ArdiQ 1.2.1 on `main` (Dependabot PR #14) | 269 passed (97.14 % coverage) locally and in CI; smoke test 29/29 in CI. ArdiQ's v1.2.1 README and `docker-compose.yml` publish Redis on `127.0.0.1` (#10) |
+| 2026-11-09 | Telegram Bot API `sendMessage` with made-up tokens (`curl`, nothing sent to any chat) | A well-formed but unknown token (`123456:fake-…`) → `401 {"ok":false,"error_code":401,"description":"Unauthorized"}`; a malformed one → `404 … "Not Found"`. Both are permanent failures (ADR-063). The 400 (unknown chat) and 403 (bot blocked) answers need a real bot: to be checked in the owner's manual test |
+| 2026-11-09 | asyncpg connecting to a closed local port (`127.0.0.1:1`) on the development machine | Not refused: it hung until asyncpg's connect timeout, `TimeoutError` after 60.01 s. Without its 3 s deadline, `/health/scheduler` would have taken a minute to answer (ADR-068); with it, `unavailable` at once |
+| 2026-11-09 | Phase 7 stack rebuilt (`docker compose up -d --build --wait`), alerts off | Worker logs once `alerts are off: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID to send them`; `ardiq status` lists the lanes `scheduler`, `alerts`, `maintenance`, `checks` and the cron `deliver_notifications` succeeding every 5 s; `docker compose config`: the `worker` gets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`, the `api` neither |
+| 2026-11-09 | `scripts/smoke_test.py` against the live stack (Phase 7) | **37/37 in 34.6 s** (29/29 in 6.5 s before the incident cases): a monitor on a `.invalid` host opened its incident 35 s after it was created (second failed check, `dns_error`), listed in `/incidents?state=open` with its monitor, shown in `/stats` as `open_incident`; pausing ended it as `paused`; `/health/scheduler` without the API key → 200 `ok` with `Cache-Control: no-store`. The worker's log lines for those checks say `incident=opened` and hold no URL of the run (0 matches) |
+| 2026-11-09 | End to end, alerts off: a failing monitor left alive past one delivery tick | Its `opened` alert became `skipped` with 0 attempts and a finish time (read as `pulseops_app`); worker log `alerts are off: 1 alert(s) skipped`. The smoke test cannot show this: it deletes its monitors, and their alerts with them, before the next tick |
+| 2026-11-09 | `scripts/ci_env.py` with the Phase 7 `.env.example`, into a scratch directory | Still 5 random secrets; `TELEGRAM_BOT_TOKEN=` and `TELEGRAM_CHAT_ID=` stay empty, and `AlertSettings` reads them as alerts off: CI needs no bot |
+| 2026-11-09 | Telegram with the project owner's real bot: `python -m pulseops.alerts test` inside the worker container | Delivered ("✅ PulseOps test message: alerts reach this chat."), confirmed by the owner in the chat. The worker started without the "alerts are off" warning |
+| 2026-11-09 22:23–22:26 UTC | DOWN and RECOVERED with the real bot: a 30 s monitor on a throwaway site (`python -m http.server` in a container on the Compose network; `ALLOW_PRIVATE_TARGETS=true` only for the test), stopped and started again | Site stopped at 22:23:55: failed checks due at 22:24:16 and 22:24:46, both `dns_error` (the stopped container is removed, so Docker's DNS no longer knows the name). The second opened the incident with `started_at` = the first; its `opened` alert was `sent` at 22:24:55, attempt 1. Site started at 22:25:08: up checks due at 22:25:16 and 22:25:46; the incident ended as `recovered` with `resolved_at` = the first; its `resolved` alert was `sent` at 22:25:55, attempt 1. `/api/v1/incidents` lists it with its monitor. Read as `pulseops_app`. The owner confirmed both messages in the chat: name, id, `dns_error`, start and duration in UTC, no URL |
+| 2026-11-09 | `/health/scheduler` with the worker stopped (`docker compose stop worker`, then `start`) | Before: 200 `ok`. Stopped at 22:26:08 → 503 `{"status":"stale"}` by 22:27:07. Started at 22:27:14 → 200 `ok` at 22:27:18. `Cache-Control: no-store` on every answer |
+| 2026-11-09 | Logs of `worker`, `postgres`, `api` and `valkey` after the DOWN/RECOVERED test, searched without printing any secret | 0 matches in every service for: the bot token, its secret part, `api.telegram.org`, the test site's host name, the Valkey and app database passwords, the API key and `redis://`. The only `http(s)://` lines: Uvicorn's bind address and a link in Valkey's overcommit warning. The worker's alert lines hold ids only: `alert opened incident=<id> monitor=<id> attempt=1 sent` |
+| 2026-11-09 | Telegram 400 with the real bot: `docker compose exec -e TELEGRAM_CHAT_ID=1 worker python -m pulseops.alerts test` (the chat id changed for that run only) | `Not sent: http_error (HTTP 400): Telegram rejected the message (for example, the chat does not exist)`, exit code 1, no token in the output |
+| 2026-11-09 | Telegram 403 with the real bot: the owner blocked the bot, then `docker compose exec worker python -m pulseops.alerts test` | `Not sent: http_error (HTTP 403): the bot cannot write to the chat (blocked, or removed from it)`, exit code 1, no token in the output. With 401 and 404 (made-up tokens), every permanent failure of ADR-063 has now been seen from the real Bot API |
+| 2026-11-09 | After the manual test: test monitor paused, test site removed, `ALLOW_PRIVATE_TARGETS=false` again (API and worker recreated) | Both containers read `false`; creating a monitor on `http://postgres:5432/` → 422 `url_target_not_allowed` again; the paused monitor keeps its `recovered` incident in the API; the worker started without the "alerts are off" warning. Once the owner had seen the incident, the monitor was deleted (204): 0 incidents and 0 alerts left, removed by the cascade |
+| 2026-11-09 | `https://example.com` from the development network | **Up again:** 200 in 74 ms with the checker in the worker container, 200 in 0.07 s with `curl` on the host; the "Example" monitor had 32 of 32 checks up over 7 days. Why it failed before (see 2026-10-27/28) and why it works now are unknown |
 | 2026-10-26/27 | Phases 0, 1 and 2 tested by the project owner | Swagger `/health` 200 (Phase 0); `psql` checks (Phase 1); manual list (Phase 2) |
 
 ## Library behaviour verified (instead of assumed)
@@ -201,6 +239,14 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | `gitleaks` (`generic-api-key`) flags any "api key" variable with a varied value, a made-up test key included | The test key's finding is listed in `.gitleaksignore` after review |
 | `gh pr edit` (GitHub CLI) fails on this repository with a GraphQL error about the deprecated classic Projects | PR titles and bodies edited through the REST API (`gh api -X PATCH repos/…/pulls/N`) |
 | Docker Hub limits anonymous registry requests to 100 per hour per address (`ratelimit-limit: 100;w=3600`); `docker buildx imagetools inspect` makes several per image | Digests looked up sparingly; GitHub-hosted runners pull without hitting it |
+| ArdiQ lane limits with three lanes: checks 29 + maintenance 1 + alerts 1 out of 32 slots leave the scheduler a slot; with checks at 30 the three lanes take all 32 and a scheduler tick never runs | `checks` limited to 29 (ADR-070); `test_scheduler_keeps_its_slot_while_every_other_lane_is_busy` |
+| SQLAlchemy 2.1: `with_for_update(key_share=True)` renders `FOR NO KEY UPDATE`; `FOR KEY SHARE` needs `read=True` as well | `store_check` reads the monitor with `read=True, key_share=True`; `test_the_monitor_row_lock_is_key_share` |
+| SQLAlchemy autoflush: running any statement first flushes the session's pending ORM changes, so a unique violation of those changes is raised by that statement, not by the later commit | When a URL changes, the open incident is closed before the monitor's fields are touched, so a duplicate URL is still a 409 (`test_patch_url_to_an_existing_one_is_a_conflict` caught the 500) |
+| PostgreSQL 18: `pulseops_app` can take transaction-level advisory locks (`pg_advisory_xact_lock(int, int)`); the lock shows in `pg_locks` and is released on commit | Incident evaluation takes turns per monitor (ADR-061); `test_app_role_can_take_transaction_advisory_locks` |
+| httpx2 2.16 logs `HTTP Request: POST <full URL>` at INFO also through a `MockTransport`; for the Bot API that URL holds the bot token | `pulseops/alerts/telegram.py` raises the `httpx2` and `httpcore2` loggers to WARNING itself |
+| In the test process, importing `pulseops.main` loads the checker, which silences httpx2 for the whole process: a module's own logging guard is never exercised there | `test_importing_alerts_alone_silences_httpx2` checks it in a fresh interpreter, as `python -m pulseops.alerts test` runs (it fails with the guard removed) |
+| httpx2 2.16: a client given an explicit transport never builds proxy routes from `HTTP(S)_PROXY`; without one, `trust_env=True` builds a route through the proxy and `trust_env=False` none | A fake transport cannot prove that proxies are ignored: `test_proxy_variables_are_ignored` inspects the real client instead |
+| pydantic-settings 2.16: an empty variable (`TELEGRAM_BOT_TOKEN=`) is read as an empty string, not as unset, unless `env_ignore_empty=True` | `AlertSettings` sets it, so `.env.example`'s empty values mean "alerts off"; `test_empty_values_mean_not_set` fails without it |
 
 ## Query performance (2026-10-28)
 
@@ -224,7 +270,7 @@ Other shapes, same script:
 
 No measured run of the batch delete in its final form (by `ctid`) contains a sequential scan.
 
-## Verified versions (2026-11-03)
+## Verified versions (2026-11-09, unchanged since 2026-11-03)
 
 | Component | Version |
 |---|---|
@@ -243,18 +289,20 @@ No measured run of the batch delete in its final form (by `ctid`) contains a seq
 | uv | 0.13.6 in CI and the image (CI reads it from the Dockerfile); 0.13.5 on the development host |
 | GitHub Actions | `actions/checkout` v7.0.1, `astral-sh/setup-uv` v10.3.3 (PR #13), runner image `ubuntu24/20261025.353` |
 | pytest / Ruff | 9.2.0 / 0.17.3 |
+| PyYAML (from `uvicorn[standard]`; one test reads `docker-compose.yml` with it) | 6.0.3 |
 | actionlint | 1.7.7 |
 | gitleaks | 8.30.1 |
 
-## Size (2026-10-28, after Phase 6)
+## Size (2026-11-09, at the close of Phase 7)
 
 | Metric | Value | Command |
 |---|---|---|
-| Commits on `main` | 75 | `git rev-list --count main` |
-| Non-blank lines in `src/` | 1774 (unchanged in Phase 6) | `find src -name '*.py' \| xargs cat \| grep -cv '^\s*$'` |
-| Non-blank lines in `tests/` | 2093 (2082 after Phase 5) | same, on `tests` |
-| ADRs | 58 | `grep -c "^## ADR-" docs/decisions.md` |
-| Merged PRs | 8 | `gh pr list --state merged` |
+| Commits on `main` | 84 before the Phase 7 merge (75 after Phase 6) | `git rev-list --count main` |
+| Commits on the Phase 7 branch | 11, the closing one included | `git rev-list --count main..HEAD` |
+| Non-blank lines in `src/` | 3057 (1774 after Phase 6) | `find src -name '*.py' \| xargs cat \| grep -cv '^\s*$'` |
+| Non-blank lines in `tests/` | 3797 (2093 after Phase 6) | same, on `tests` |
+| ADRs | 70 (58 after Phase 6) | `grep -c "^## ADR-" docs/decisions.md` |
+| Merged PRs | 12 before Phase 7's (8 after Phase 6) | `gh pr list --state merged` |
 
 ## Upstream issues
 

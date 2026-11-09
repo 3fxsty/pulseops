@@ -96,7 +96,7 @@ Plataforma de monitorización de webs y APIs: comprueba periódicamente si respo
 | CI/CD | GitHub Actions | Lint, tests y el stack entero con smoke test en cada PR y en cada push a `main` (ADR-053); CodeQL (default setup) analiza Python y Actions |
 | Contenedores | Docker + Docker Compose | Levantar todos los servicios juntos |
 | Interfaz | Swagger (MVP) → **pendiente**: Grafana y/o HTMX | Ver el estado |
-| Alertas | Bot de Telegram (post-MVP) | Avisar de caídas |
+| Alertas | Bot de Telegram (Bot API directa con httpx2, Fase 7, ADR-064) | Avisar al empezar y al acabar cada incidente |
 | Proxy inverso | **pendiente**: Nginx o Caddy | Entrada desde internet + HTTPS |
 | Servidor | VPS (Hetzner) | Producción |
 
@@ -179,6 +179,13 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
   - Formato RFC 9457 + campo `code`.
   - Los 500 son siempre genéricos.
   - Nunca se devuelve `input`, SQL, nombres de restricciones o tablas, ni trazas.
+- **Alertas por Telegram** (Fase 7, ADR-063 a ADR-066):
+  - el token del bot es `SecretStr` en `AlertSettings`, que solo usa el worker; **la API nunca lo recibe**;
+  - el token va en la URL de la Bot API, así que nunca se registra la URL, ni el mensaje de las excepciones de httpx2, ni la respuesta de Telegram: solo el tipo de error y el código HTTP;
+  - la dirección de la Bot API es fija en el código (`https://api.telegram.org`); ninguna variable la cambia, y los tests usan un `MockTransport`;
+  - los mensajes van en texto plano y **nunca llevan la URL del monitor ni el `error_detail`** (Telegram es un tercero que guarda los mensajes);
+  - el bot solo envía, nunca recibe: nada escucha a Telegram.
+- **`/health/scheduler`** (ADR-068): sin API key y sin devolver la hora del último turno; en la Fase 9 necesita el límite de peticiones del proxy.
 - **API key:** obligatoria, de 32 caracteres o más, como `SecretStr` en `ApiSettings` (el worker nunca la ve). Se compara con `secrets.compare_digest` y nunca aparece en logs.
 - **CORS:** desactivado. Si algún día hace falta, solo para dominios concretos, nunca `*`.
 - **Exposición:** la API se publica solo en `127.0.0.1` hasta la Fase 9.
@@ -192,9 +199,10 @@ ArdiQ solo usa funciones presentes en Redis 7.2 (base de Valkey), así que deber
 
 1. El usuario usa la **API (FastAPI)** para añadir monitores → se guardan en **PostgreSQL**.
 2. Un **cron de ArdiQ** decide qué monitores tocan y deja encargos en **Valkey**.
-3. El **worker de ArdiQ** coge cada encargo, comprueba la web con **httpx2** y guarda el resultado en **PostgreSQL**.
-4. La API calcula estado, uptime y tiempos a partir del historial.
-5. (Post-MVP) Si hay caída → alerta por **Telegram**; métricas en **Grafana**; todo detrás de **Nginx/Caddy** en un VPS.
+3. El **worker de ArdiQ** coge cada encargo, comprueba la web con **httpx2** y guarda el resultado en **PostgreSQL**. En la misma transacción decide si se abre o se cierra un **incidente** y, si es así, apunta el aviso pendiente (*outbox*) (Fase 7).
+4. Otro **cron del worker** entrega los avisos pendientes por **Telegram**, con reintentos (Fase 7).
+5. La API calcula estado, uptime y tiempos a partir del historial, y muestra los incidentes.
+6. (Post-MVP) Métricas en **Grafana**; todo detrás de **Nginx/Caddy** en un VPS.
 
 ---
 
@@ -337,15 +345,64 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 - Terminada cuando: check verde en GitHub y release **v0.1.0**. → **MVP completo.**
 
 ### Post-MVP
-- **Pendiente sin fase asignada:** **códigos de respuesta esperados configurables por monitor.** Hoy, un 401/403 de una API protegida, o de una web que bloquea robots, sale como caída.
-- **Fase 7 — Alertas e incidentes:** Telegram, agrupar caídas en incidentes, anti-spam (p. ej. avisar tras N fallos seguidos).
-  - "Quién vigila al vigilante": que `/health` indique si el planificador ha funcionado hace poco, para poder alertar si se para. El dato ya existe desde la Fase 4: `scheduler_heartbeat.last_success_at` (ADR-045).
+- **Pendiente sin fase asignada:**
+  - **códigos de respuesta esperados configurables por monitor.** Hoy, un 401/403 de una API protegida, o de una web que bloquea robots, sale como caída. Con las alertas de la Fase 7 molesta más; mientras tanto, ese monitor se puede pausar;
+  - **recordatorios** de un incidente que sigue abierto ("sigue caída tras 1 h");
+  - **comandos del bot** (`/status`): exigiría que el bot reciba mensajes;
+  - **otros canales** de aviso (email, Discord), sobre la interfaz `Notifier`.
+- **Fase 7 — Alertas e incidentes:** Telegram, agrupar caídas en incidentes, anti-spam y vigilar el planificador.
+  - Decidido (ADR-059 a ADR-070):
+    - **Incidente:** se abre con **2 fallos seguidos** y se cierra con **2 aciertos seguidos** (constantes globales). `started_at` = el primer fallo de la racha y `resolved_at` = el primer acierto. Un hueco de más de 2 × intervalo + 60 s corta la racha (como ADR-047). Una racha nunca empieza antes del `resolved_at` del incidente anterior.
+    - **Detección en la transacción del check** (`run_check`):
+      1. `pg_advisory_xact_lock(<espacio de incidentes>, monitor_id)`: de uno en uno por monitor, sin bloquear al planificador;
+      2. insertar el check;
+      3. evaluar **solo si se insertó y es el más reciente** (un check tardío se guarda, pero no decide) y si el monitor sigue activo;
+      4. abrir o cerrar el incidente y apuntar el aviso;
+      5. un solo commit.
+      La regla es una función pura en `pulseops/incidents.py`.
+    - **Tabla `incidents`** (migración `0004`):
+      - `id` + `public_id` UUID v7, `monitor_id` (cascada), `started_at`, `resolved_at`, `error_kind`, `status_code` y `resolution` (`recovered` / `paused` / `monitor_changed`);
+      - un solo incidente abierto por monitor (índice único parcial) y único `(monitor_id, started_at)`.
+      - **Pausar o cambiar la URL** cierra el incidente (toma el mismo candado) sin aviso de "recuperado".
+      - Los incidentes cerrados se borran al cumplir **1 año**, en el cron de limpieza.
+    - **Outbox** (tabla `notifications`, migración `0004`):
+      - un aviso `opened` / `resolved` por incidente, con estado `pending` / `sent` / `failed` / `skipped`;
+      - el cron `deliver_notifications`, cada 5 s, reclama con `SKIP LOCKED` y una reserva de 60 s, hace commit y después envía: **sin conexión de BD abierta durante el envío**;
+      - **cada envío acaba muy dentro de su reserva** (condición de Toni): un plazo total de 10 s por envío (`asyncio.timeout`, porque los timeouts de httpx2 son por fase) y cada aviso se reclama justo antes de enviarlo, de uno en uno. Un test comprueba que la reserva es al menos 3 veces el plazo y que un envío colgado se corta;
+      - **solo se reintentan los fallos temporales** (decisión de Toni, 2026-11-09): red, timeout, 429 y 5xx, esperando 10 s y creciendo hasta 1 h, o lo que diga el `retry_after` del 429;
+      - **un fallo permanente** (400, 401, 403, 404…: token inválido, chat inexistente, bot bloqueado) pasa a `failed` al momento, con un log ERROR que dice el problema, sin token ni URL. Punto débil: arreglar el token no recupera los avisos fallidos mientras tanto (los incidentes sí quedan en la API);
+      - **los reintentos se rinden** tras 20 intentos o **24 h desde el primer intento** (columna `first_attempt_at`) → `failed`, con un log ERROR sin token ni URL. Si el siguiente reintento caería fuera de las 24 h, se rinde en ese momento;
+      - **un aviso se descarta por inútil, nunca por viejo** (decisión de Toni, 2026-11-09): un DOWN con el incidente aún abierto se envía siempre (si no, una caída anterior a un parón del worker no avisaría nunca); un DOWN con el incidente ya cerrado pasa a `skipped` (el RECOVERED lleva inicio y duración; si se cerró por pausa o cambio de URL, lo hizo la propia persona); el RECOVERED se envía siempre;
+      - "resuelto" **espera** mientras "abierto" siga `pending`;
+      - sin bot configurado → `skipped`.
+    - **Telegram:** Bot API directa con httpx2 detrás de `Notifier`. Dirección fija, `trust_env=False`, TLS verificado, texto plano.
+    - **Mensaje:** nombre, `public_id`, `error_kind`, código HTTP, inicio y duración, en UTC. Nunca la URL ni el `error_detail`.
+    - **`AlertSettings`** (solo worker): `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID`, opcionales, los dos o ninguno. Comando `python -m pulseops.alerts test`.
+    - **Anti-spam:** un mensaje por evento, respetando el 429, sin recordatorios.
+    - **`GET /health/scheduler`** (sin API key): 200 `ok` si el último turno tiene menos de 60 s; 503 `stale`, o `unavailable` si la BD no responde en 3 s; JSON simple como `/health` (no RFC 9457), con `Cache-Control: no-store` (condición de Toni) y sin la hora. `/health` no cambia.
+    - **API** (formas aprobadas el 2026-11-09):
+      - `GET /api/v1/monitors/{id}/incidents` y `GET /api/v1/incidents?state=open|resolved` (lista cerrada, otro valor → 422);
+      - páginas `{items, next_cursor}`; un incidente es `{id, started_at, resolved_at, error_kind, status_code, resolution}`; en la lista global, además, `monitor: {id, name}` (anidado);
+      - sin campos calculados (`duration_seconds`, `state`): añadir es fácil, quitar rompe;
+      - cursor opaco `base64url` de `i1:<µs>:<id del incidente>`, uno para las dos listas;
+      - `open_incident` (`id`, `started_at`, `error_kind`, `status_code`) en `/stats`, detrás de `last_check`.
+    - **Carril `alerts`** (límite 1); `checks` baja a 29. Se comprueba contra Valkey real.
+  - Terminada cuando:
+    - Toni recibe en Telegram el aviso de caída y el de recuperación, sin URL ni token en los mensajes ni en los logs;
+    - el incidente se ve en la API, y una web que alterna no genera avisos sin parar;
+    - con Telegram caído, el aviso se reintenta, respeta el orden y se rinde según la regla;
+    - `/health/scheduler` da 503 con el worker parado;
+    - Ruff, tests (cobertura ≥ 95 %) y CI en verde;
+    - Toni lo prueba.
 - **Fase 8 — Interfaz y métricas:** Grafana y/o HTMX; métricas Prometheus.
 - **Fase 9 — Despliegue:** VPS, Nginx o Caddy, dominio, HTTPS, despliegue automático.
   - En el proxy: límite de tamaño de las peticiones y de intentos fallidos de API key.
   - Poner la API detrás del proxy y quitar su publicación en `127.0.0.1`.
   - Decidir `DOCS_ENABLED` en producción.
   - El SSRF ya contempla un VPS solo IPv6 con DNS64/NAT64.
+  - `/health/scheduler` no lleva API key y consulta la BD: **necesita el límite de peticiones del proxy** (ADR-068).
+  - Configurar un **vigilante externo** (uptime monitor o *dead man's switch*) que consulte `/health/scheduler` (ADR-068).
+  - **Aviso global de "el problema somos nosotros"**: si caen muchos monitores a la vez, un solo aviso en vez de uno por monitor (ADR-067).
 - **Fase 10 — Extras:** usuarios y login, página de estado pública, etc.
   - Sustituir la API key por usuarios.
   - Filtro por dueño en el repositorio, que es la única capa de acceso a datos.
@@ -369,7 +426,46 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** **MVP completo: release v0.1.0** (2026-10-28). El repo es **público**. Fase 6 cerrada (PR #7 y el cierre en el PR #11, fusionados el 2026-10-28; CI en verde en `main`). Después: repaso de seguridad (PR #12) y dependencias de Dependabot (PR #13 y #14). Siguiente: la Fase 7, en modo plan.
+- **Fase actual:** **Fase 7 — Alertas e incidentes, terminada** el 2026-11-09 (plan aprobado el 2026-11-03, ADR-059 a ADR-070). Está en la rama `phase-7-alerts-and-incidents`, con el PR hacia `main` pendiente de fusionar. **Siguiente fase:** la 8 (interfaz y métricas), que empieza en modo plan (regla 8) cuando Toni lo apruebe.
+- **Hecho en Fase 7:**
+  - migración `0004` (`incidents` y `notifications`, con `first_attempt_at`) y sus modelos, revisada a mano;
+  - `pulseops/incidents.py` (la regla pura) y la detección dentro de `store_check`: candado consultivo por monitor, el check tardío no decide y un solo commit. Pausar o cambiar la URL cierra el incidente sin aviso de "recuperado";
+  - `pulseops/alerts/` (`Notifier`, `TelegramNotifier`, los mensajes y `python -m pulseops.alerts test`) y `AlertSettings`;
+  - el *outbox* con el cron `deliver_notifications` (`pulseops/delivery.py`) en el carril `alerts`, que solo reintenta los fallos temporales. `checks` baja a 29;
+  - la retención de los incidentes cerrados: 1 año;
+  - en la API: `/api/v1/monitors/{id}/incidents`, `/api/v1/incidents` (cursor `i1`), `open_incident` en `/stats` y `/health/scheduler` (con `Cache-Control: no-store`);
+  - Compose (Telegram solo para el worker, opcional), `.env.example`, README (sección "Incidents and alerts") y el smoke test (37/37);
+  - 469 tests (cobertura del 98,29 %), Ruff limpio y `alembic check` limpio;
+  - **prueba manual de Toni con su bot real** (2026-11-09):
+    - le llegaron el mensaje de prueba, el DOWN y el RECOVERED, sin la URL;
+    - se vieron el 400 (chat inexistente) y el 403 (bot bloqueado);
+    - `/health/scheduler` dio 503 con el worker parado;
+    - no aparecen ni el token, ni URLs, ni contraseñas en ningún log.
+
+    El detalle está en `docs/evidence.md`. Para repetir la prueba hay un truco: una web de prueba lanzada con `docker run --rm` y luego apagada da `dns_error`, no `connection_error`, porque el contenedor se borra y el DNS de Docker deja de conocer el nombre. Además hace falta `ALLOW_PRIVATE_TARGETS=true` solo mientras dure la prueba.
+- **Cambios descubiertos en Fase 7 (durante la construcción):**
+  - **Convención de nombres:** los `uq_` llevan ahora todas sus columnas (`column_0_N_name`). Si no, el único de `(monitor_id, started_at)` se llamaría `uq_incidents_monitor_id`, como si `monitor_id` fuera único. Los nombres de una sola columna no cambian (`alembic check` limpio).
+  - **`with_for_update(key_share=True)` de SQLAlchemy da `FOR NO KEY UPDATE`;** para `FOR KEY SHARE` hace falta además `read=True`. Hay un test que lo fija.
+  - **El *autoflush* adelanta los errores:** cualquier sentencia guarda antes los cambios pendientes del ORM. Al cambiar la URL, cerrar el incidente *después* de tocar el monitor hacía saltar el `uq_monitors_url` fuera de `_commit` → un 500 en vez del 409 (lo detectó `test_patch_url_to_an_existing_one_is_a_conflict`). Ahora se cierra el incidente antes de tocar los campos.
+  - **`store_check` lee el monitor con `FOR KEY SHARE`** antes de insertar: un monitor borrado ya no provoca un error de clave foránea que haya que capturar. `record_check` ya no hace commit ni captura ese error.
+  - **Un test de concurrencia que no demostraba nada:** sin candado, las dos tareas acababan en orden y el test seguía pasando. Ahora cada `store_check` espera entre evaluar y hacer commit (con `monkeypatch`), y sin candado el test falla, como debe. Comprobado rompiendo el código a propósito: sin el candado, sin la regla del check tardío, sin `not_before`, con la pausa sin candado y con `FOR UPDATE`, su test falla en cada caso.
+  - **httpx2 escribe la URL completa (con el token del bot) a nivel INFO,** también con `MockTransport`. `alerts/telegram.py` silencia httpx2 por su cuenta. **Dentro de pytest eso no se ponía a prueba:** al importar `pulseops.main` se carga el comprobador, que silencia httpx2 para todo el proceso. Ahora lo comprueba un test en un intérprete limpio, como corre `python -m pulseops.alerts test`.
+  - **Con un *transport* inyectado, httpx2 ignora las variables de proxy.** Un test con `MockTransport` no podía demostrar `trust_env=False`; el test mira el cliente real.
+  - **pydantic-settings lee `TELEGRAM_BOT_TOKEN=` (vacío) como texto vacío,** no como "sin poner", salvo con `env_ignore_empty=True`. Sin eso, el `.env.example` con valores vacíos impediría arrancar el worker.
+  - **El nombre de un monitor admite saltos de línea** (la API solo limita la longitud). En los avisos se convierten en espacios, para que un nombre no pueda colar una línea falsa ("RECOVERED").
+  - **`AlertSettings` pasa del paso 6 al 5:** el comando de prueba ya lo necesita.
+  - **Respuestas reales de Telegram** (2026-11-09, con tokens inventados): un token con buena forma pero falso da `401 Unauthorized`; uno mal formado, `404 Not Found`. El 400 (chat inexistente) y el 403 (bot bloqueado) necesitan un bot real: **comprobarlos en la prueba manual (paso 9)**.
+  - **Con tres carriles, `checks` en 30 deja al planificador sin hueco** (29 + 1 + 1 + el suyo = 32). Comprobado contra Valkey real.
+  - **Los tests del worker fuerzan las alertas apagadas** (`AlertSettings` sustituido en el fixture): si el `.env` de desarrollo tuviera un token real, ningún test podría escribir a ese bot.
+  - **Las 24 h de reintentos se cuentan desde el primer intento, no desde que se creó el aviso:** si no, un DOWN que esperó a un worker parado tendría un solo intento si Telegram fallaba justo entonces. Hizo falta la columna `first_attempt_at`, añadida en la propia `0004`, que aún no había salido de la rama (la BD de desarrollo se rehízo con `downgrade 0003` + `upgrade`; tenía 0 incidentes y 0 avisos).
+  - **Conectar a un puerto local cerrado no siempre se rechaza al momento:** en la máquina de desarrollo, asyncpg se quedó colgado 60 s (su timeout de conexión) contra `127.0.0.1:1`. Es justo el caso que cubre el plazo de 3 s de `/health/scheduler`.
+  - **`/health` se mueve a `api/health.py`,** junto a `/health/scheduler`, sin cambiar su comportamiento.
+  - **example.com vuelve a responder desde la red de desarrollo** (2026-11-09): 200 en ~70 ms con el comprobador y con `curl`. No se sabe por qué fallaba antes ni qué ha cambiado (ver "Cambios descubiertos en Fase 3 y 4").
+  - **El smoke test pasa de 29/29 en 6,5 s a 37/37 en unos 35 s:** el incidente necesita 2 checks fallidos con 30 s de intervalo. Su monitor se crea al principio para que el resto de la prueba corra mientras tanto.
+  - **El smoke test no puede ver el reparto de avisos:** borra sus monitores (y en cascada sus avisos) antes del siguiente turno del cron. Comprobado aparte, de punta a punta: con las alertas apagadas, el aviso pasa a `skipped`.
+  - **PyYAML** llega con `uvicorn[standard]` (dependencia de producción); un test lo usa para leer `docker-compose.yml` y comprobar que la API nunca recibe el token.
+  - **El cron de reparto solo registra el *tipo* de un error inesperado,** no su mensaje: un fallo del canal podría citar la URL de la Bot API, que lleva el token.
+- **Antes:** MVP completo con la release v0.1.0 (2026-10-28) y el repo **público**. Fase 6 cerrada (PR #7 y PR #11). Después vinieron el repaso de seguridad (PR #12), las dependencias de Dependabot (PR #13 y #14) y la documentación de ArdiQ 1.2.1 (PR #15).
 - **Hecho en Fase 6:**
   - `.github/workflows/ci.yml` con los jobs `lint`, `test` y `stack`, en verde en GitHub;
   - prueba del rojo: PR #8, cerrado sin fusionar, con los logs del fallo revisados;
@@ -490,7 +586,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - `ardiq doctor` OK contra Valkey;
   - cambio de httpx a httpx2;
   - ADR-001 a ADR-008.
-- **Pendiente de decidir:** interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
+- **Pendiente de decidir:** interfaz visual (Fase 8), Nginx o Caddy (Fase 9).
 - **Repaso de seguridad previo a la Fase 7 (PR #12, fusionado):**
   - `SECURITY.md` añadido (versiones 0.1.x, aviso por *Report a vulnerability*, respuesta en 7 días como objetivo).
   - `DOCS_ENABLED` pasa a `false` por defecto (código y Compose); `.env.example` lo pone a `true` para desarrollo (ADR-027, enmienda).
@@ -503,4 +599,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso:** empezar la Fase 7 (alertas e incidentes) en modo plan.
+- **Siguiente paso:**
+  1. **Cerrar la Fase 7:** push de la rama y PR hacia `main` (con el OK de Toni), CI en verde, y Toni lo fusiona. La fila de la Fase 7 en `docs/evidence.md` dice "PR #18, 2026-11-09". Si el número o la fecha de la fusión no coinciden, hay que corregirla.
+  2. **Revisar los PR de Dependabot** que llegaron durante la Fase 7: #16 (uv 0.13.7, en la imagen y en CI) y #17 (Ruff 0.17.4).
+  3. **Fase 8 (interfaz y métricas):** empezar en modo plan (regla 8) cuando Toni lo apruebe.

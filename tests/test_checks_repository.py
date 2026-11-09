@@ -68,19 +68,6 @@ async def test_the_same_check_twice_stores_one_row(session):
     assert check.is_up is True  # the first one wins
 
 
-async def test_a_deleted_monitor_is_not_an_error(session):
-    monitor = await add_monitor(session)
-    await session.delete(monitor)
-    await session.commit()
-
-    stored = await record_check(
-        session, monitor_id=monitor.id, scheduled_at=SCHEDULED_AT, outcome=UP
-    )
-
-    assert stored is False
-    assert await session.scalar(select(func.count()).select_from(Check)) == 0
-
-
 # --- reading and deleting history ---
 
 

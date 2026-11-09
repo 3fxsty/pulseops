@@ -44,6 +44,10 @@ services:
       DATABASE_URL: postgresql+asyncpg://pulseops_app:${PULSEOPS_APP_PASSWORD:?set it in .env}@postgres:5432/pulseops
       BROKER_URL: redis://:${VALKEY_PASSWORD:?set it in .env}@valkey:6379/0
       ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
+      # Telegram alerts (ADR-066): optional, both or neither. Empty means
+      # alerts off. Only the worker gets the bot token, never the API.
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     depends_on:
       migrate:
         condition: service_completed_successfully

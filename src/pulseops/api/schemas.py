@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from pulseops.db.models import Check, Monitor
+from pulseops.db.models import Check, Incident, Monitor
 from pulseops.status import Status
 
 NAME_MAX_LENGTH = 100
@@ -98,6 +98,8 @@ ErrorKind = Literal[
     "blocked_target",
 ]
 Period = Literal["24h", "7d", "30d"]
+Resolution = Literal["recovered", "paused", "monitor_changed"]
+IncidentState = Literal["open", "resolved"]
 
 
 class CheckRead(BaseModel):
@@ -127,12 +129,95 @@ class CheckPage(BaseModel):
     )
 
 
+class IncidentRead(BaseModel):
+    """An outage: consecutive failed checks, from start to end (ADR-060)."""
+
+    id: UUID = Field(description="Public identifier of the incident.")
+    started_at: datetime = Field(description="When its first failed check was due.")
+    resolved_at: datetime | None = Field(
+        description="When its first successful check was due, or when the "
+        "monitor was paused or got a new URL. Null while open."
+    )
+    error_kind: ErrorKind = Field(description="Why its first failed check failed.")
+    status_code: int | None
+    resolution: Resolution | None = Field(description="How it ended. Null while open.")
+
+    @classmethod
+    def from_model(cls, incident: Incident) -> Self:
+        # Mapped field by field: the internal integer ids are never exposed.
+        return cls(
+            id=incident.public_id,
+            started_at=incident.started_at,
+            resolved_at=incident.resolved_at,
+            error_kind=incident.error_kind,
+            status_code=incident.status_code,
+            resolution=incident.resolution,
+        )
+
+
+class IncidentPage(BaseModel):
+    items: list[IncidentRead]
+    next_cursor: str | None = Field(
+        description="Pass it as `cursor` to get the next page; null on the last one."
+    )
+
+
+class MonitorRef(BaseModel):
+    id: UUID = Field(description="Public identifier of the monitor.")
+    name: str
+
+
+class IncidentAcrossMonitors(BaseModel):
+    """An incident in the list across monitors: which monitor it belongs to."""
+
+    id: UUID
+    monitor: MonitorRef
+    started_at: datetime
+    resolved_at: datetime | None
+    error_kind: ErrorKind
+    status_code: int | None
+    resolution: Resolution | None
+
+    @classmethod
+    def from_row(cls, incident: Incident, monitor_id: UUID, monitor_name: str) -> Self:
+        return cls(
+            **IncidentRead.from_model(incident).model_dump(),
+            monitor=MonitorRef(id=monitor_id, name=monitor_name),
+        )
+
+
+class IncidentAcrossMonitorsPage(BaseModel):
+    items: list[IncidentAcrossMonitors]
+    next_cursor: str | None = Field(
+        description="Pass it as `cursor` to get the next page; null on the last one."
+    )
+
+
+class OpenIncidentRead(BaseModel):
+    id: UUID
+    started_at: datetime
+    error_kind: ErrorKind
+    status_code: int | None
+
+    @classmethod
+    def from_model(cls, incident: Incident) -> Self:
+        return cls(
+            id=incident.public_id,
+            started_at=incident.started_at,
+            error_kind=incident.error_kind,
+            status_code=incident.status_code,
+        )
+
+
 class MonitorStats(BaseModel):
     status: Status = Field(
         description="From the latest check; `unknown` if there is none or it is "
         "older than 2 intervals + 60 s, `paused` if the monitor is inactive."
     )
     last_check: CheckRead | None
+    open_incident: OpenIncidentRead | None = Field(
+        description="The monitor's incident still going on, if any."
+    )
     period: Period
     # `from` is a Python keyword: the field is renamed only on the wire.
     since: datetime = Field(serialization_alias="from")

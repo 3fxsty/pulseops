@@ -4,13 +4,11 @@ from datetime import datetime, timedelta
 
 from sqlalchemy import Delete, Select, any_, column, delete, func, select
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pulseops.checker import CheckOutcome
 from pulseops.db.models import Check
 
-MONITOR_FOREIGN_KEY = "fk_checks_monitor_id_monitors"
 # A row's physical address in the table (PostgreSQL system column).
 CTID = column("ctid")
 
@@ -34,12 +32,13 @@ async def record_check(
     scheduled_at: datetime,
     outcome: CheckOutcome,
 ) -> bool:
-    """Store one check. Returns False if nothing was stored.
+    """Insert one check, without committing. Returns False if nothing was stored.
 
     Idempotent: the queue delivers at least once, so the same check
     (monitor_id, scheduled_at) may arrive twice; the second is a no-op
-    (ON CONFLICT DO NOTHING on the primary key). A monitor deleted while its
-    check was running is not an error either: there is nothing to record.
+    (ON CONFLICT DO NOTHING on the primary key). The caller commits, in the
+    same transaction as the incident evaluation (ADR-061), and makes sure the
+    monitor still exists (pulseops.scheduling.store_check).
     """
     statement = (
         insert(Check)
@@ -55,16 +54,7 @@ async def record_check(
         .on_conflict_do_nothing()
         .returning(Check.monitor_id)
     )
-    try:
-        stored = await session.scalar(statement)
-        await session.commit()
-    except IntegrityError as error:
-        await session.rollback()
-        constraint = getattr(error.orig.__cause__, "constraint_name", None)
-        if constraint == MONITOR_FOREIGN_KEY:
-            return False
-        raise
-    return stored is not None
+    return await session.scalar(statement) is not None
 
 
 # The statements are built apart from running them, so that

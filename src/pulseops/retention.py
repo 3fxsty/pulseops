@@ -1,4 +1,5 @@
-"""Retention: checks older than 30 days are deleted (MVP business rule).
+"""Retention: checks older than 30 days are deleted (MVP business rule), and
+incidents resolved more than a year ago (ADR-062).
 
 ArdiQ only wraps this (pulseops/queue/tasks.py), like pulseops.scheduling.
 """
@@ -11,10 +12,13 @@ from datetime import timedelta
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from pulseops.repositories.checks import delete_expired_checks
+from pulseops.repositories.incidents import delete_expired_incidents
 
 logger = logging.getLogger(__name__)
 
 RETENTION = timedelta(days=30)
+# Incidents are the long-term history: checks only last 30 days.
+INCIDENT_RETENTION = timedelta(days=365)
 # Small batches keep every transaction, and its locks, short.
 BATCH_SIZE = 5000
 # No new batch starts after this; what is left goes in the next run.
@@ -54,4 +58,15 @@ async def purge_expired_checks(
         finished,
         "" if finished else " (time limit reached, the rest goes next run)",
     )
+    return deleted
+
+
+async def purge_expired_incidents(
+    sessions: async_sessionmaker[AsyncSession],
+    *,
+    retention: timedelta = INCIDENT_RETENTION,
+) -> int:
+    async with sessions() as session:
+        deleted = await delete_expired_incidents(session, retention=retention)
+    logger.info("retention incidents deleted=%s", deleted)
     return deleted

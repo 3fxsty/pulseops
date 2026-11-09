@@ -9,6 +9,10 @@ waits for a new monitor's first automatic check). It only touches the
 monitors it creates (unique URLs per run) and deletes them at the end, so it
 is safe to run against a stack with real data. The API key comes from .env.
 It needs internet access. Exit code 0 means every check passed.
+
+A monitor that always fails opens an incident after its second check, 30 s
+after the first (the shortest interval): it is created first, so the rest of
+the run overlaps that wait.
 """
 
 import argparse
@@ -30,8 +34,18 @@ CHECK_KEYS = {
     "error_kind",
     "error_detail",
 }
+INCIDENT_KEYS = {
+    "id",
+    "started_at",
+    "resolved_at",
+    "error_kind",
+    "status_code",
+    "resolution",
+}
 # The scheduler ticks every 5 s; a new monitor is due at once.
 FIRST_CHECK_TIMEOUT_SECONDS = 20
+# Two failed checks 30 s apart, plus the scheduler's tick and some margin.
+INCIDENT_TIMEOUT_SECONDS = 60
 INTERNALS = re.compile(r"uq_|ck_|pk_|fk_|SELECT|INSERT|UPDATE |Traceback|asyncpg")
 
 
@@ -70,13 +84,28 @@ class Smoke:
 
 
 def run(base_url: str, api_key: str) -> list[tuple[bool, str, str]]:
-    base = f"{base_url.rstrip('/')}/api/v1/monitors"
+    root = base_url.rstrip("/")
+    base = f"{root}/api/v1/monitors"
     run_id = uuid.uuid4().hex[:8]
     created: list[str] = []
 
     with httpx2.Client(headers={"X-API-Key": api_key}, timeout=30) as client:
         smoke = Smoke(client, base)
         try:
+            # 0. A monitor that always fails (.invalid never resolves): it
+            # opens an incident while the rest of the run goes on (section 7).
+            failing = smoke.check(
+                "create a monitor that always fails",
+                smoke.create(
+                    name="Failing",
+                    url=f"https://smoke-{run_id}.invalid/",
+                    interval_seconds=30,
+                ),
+                201,
+            )
+            created.append(failing["id"])
+            failing_created = time.monotonic()
+
             # 1. Authentication
             smoke.check("no API key", httpx2.get(base), 401, "unauthorized")
             smoke.check(
@@ -295,7 +324,75 @@ def run(base_url: str, api_key: str) -> list[tuple[bool, str, str]]:
                 extra=lambda r, b: b["status"] == "paused",
             )
 
-            # 7. Not found and delete
+            # 7. Incidents (needs the worker): two failed checks open one
+            incidents_url = f"{base}/{failing['id']}/incidents"
+            while True:
+                incidents = client.get(incidents_url)
+                waited = time.monotonic() - failing_created
+                if incidents.json().get("items") or waited > INCIDENT_TIMEOUT_SECONDS:
+                    break
+                time.sleep(1)
+            incident = smoke.check(
+                f"two failed checks open an incident ({waited:.0f} s)",
+                incidents,
+                200,
+                extra=lambda r, b: (
+                    len(b["items"]) == 1
+                    and set(b["items"][0]) == INCIDENT_KEYS
+                    and b["items"][0]["error_kind"] == "dns_error"
+                    and b["items"][0]["resolved_at"] is None
+                ),
+            )["items"][0]
+            smoke.check(
+                "open incidents across monitors",
+                client.get(f"{root}/api/v1/incidents", params={"state": "open"}),
+                200,
+                extra=lambda r, b: (
+                    {
+                        "id": failing["id"],
+                        "name": "Failing",
+                    }
+                    in [i["monitor"] for i in b["items"] if i["id"] == incident["id"]]
+                ),
+            )
+            smoke.check(
+                "stats show the open incident",
+                client.get(f"{base}/{failing['id']}/stats"),
+                200,
+                extra=lambda r, b: (
+                    b["status"] == "down" and b["open_incident"]["id"] == incident["id"]
+                ),
+            )
+            smoke.check(
+                "unknown incident state",
+                client.get(f"{root}/api/v1/incidents", params={"state": "closed"}),
+                422,
+                "validation_error",
+            )
+            smoke.check(
+                "forged incident cursor",
+                client.get(incidents_url, params={"cursor": "forged-cursor"}),
+                422,
+                "invalid_cursor",
+                extra=lambda r, b: "forged-cursor" not in r.text,
+            )
+            client.patch(f"{base}/{failing['id']}", json={"is_active": False})
+            smoke.check(
+                "pausing ends the incident",
+                client.get(incidents_url),
+                200,
+                extra=lambda r, b: b["items"][0]["resolution"] == "paused",
+            )
+            smoke.check(
+                "scheduler health, without the API key",
+                httpx2.get(f"{root}/health/scheduler"),
+                200,
+                extra=lambda r, b: (
+                    b == {"status": "ok"} and r.headers["cache-control"] == "no-store"
+                ),
+            )
+
+            # 8. Not found and delete
             wrong = google["id"][:-1] + ("0" if google["id"][-1] != "0" else "1")
             smoke.check(
                 "unknown id", client.get(f"{base}/{wrong}"), 404, "monitor_not_found"

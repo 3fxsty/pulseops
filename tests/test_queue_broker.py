@@ -12,6 +12,7 @@ import pytest
 from ardiq import Ardiq
 
 from pulseops.queue.app import (
+    ALERTS_LANE,
     CHECKS_LANE,
     LANE_LIMITS,
     MAINTENANCE_LANE,
@@ -107,14 +108,14 @@ async def test_payload_carries_plain_integers(queue):
     assert runs == [microseconds]
 
 
-async def test_scheduler_keeps_its_slot_while_checks_and_cleanup_are_busy(
+async def test_scheduler_keeps_its_slot_while_every_other_lane_is_busy(
     test_broker_url,
 ):
-    # The worker's real lane setup: checks and cleanup fill their lanes (and
-    # have more waiting), yet a scheduler tick still runs at once.
+    # The worker's real lane setup: checks, cleanup and alerts fill their
+    # lanes (and have more waiting), yet a scheduler tick still runs at once.
     app = build_app(test_broker_url, f"pulseops_test_{uuid.uuid4()}")
     release = asyncio.Event()
-    busy = {CHECKS_LANE: 0, MAINTENANCE_LANE: 0}
+    busy = {CHECKS_LANE: 0, MAINTENANCE_LANE: 0, ALERTS_LANE: 0}
     ticked = asyncio.Event()
 
     @app.task(name="slow_check", priority=CHECKS_LANE)
@@ -127,6 +128,11 @@ async def test_scheduler_keeps_its_slot_while_checks_and_cleanup_are_busy(
         busy[MAINTENANCE_LANE] += 1
         await release.wait()
 
+    @app.task(name="slow_alert", priority=ALERTS_LANE)
+    async def slow_alert(n: int) -> None:
+        busy[ALERTS_LANE] += 1
+        await release.wait()
+
     @app.task(name="tick", priority=SCHEDULER_LANE)
     async def tick() -> None:
         ticked.set()
@@ -136,13 +142,14 @@ async def test_scheduler_keeps_its_slot_while_checks_and_cleanup_are_busy(
             await slow_check.enqueue(n)
         for n in range(3):
             await slow_cleanup.enqueue(n)
+            await slow_alert.enqueue(n)
 
         async with running(app):
             async with asyncio.timeout(5):
                 while busy != LANE_LIMITS:
                     await asyncio.sleep(0.05)
             await asyncio.sleep(0.3)  # time to (wrongly) take more
-            assert busy == {CHECKS_LANE: 30, MAINTENANCE_LANE: 1}
+            assert busy == {CHECKS_LANE: 29, MAINTENANCE_LANE: 1, ALERTS_LANE: 1}
 
             await tick.enqueue()
             async with asyncio.timeout(5):

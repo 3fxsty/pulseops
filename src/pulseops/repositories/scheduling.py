@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
@@ -88,3 +88,15 @@ async def record_scheduler_success(session: AsyncSession) -> None:
 async def get_scheduler_last_success(session: AsyncSession) -> datetime | None:
     """When the scheduler last completed a tick; None if it never has."""
     return await session.scalar(select(SchedulerHeartbeat.last_success_at))
+
+
+async def scheduler_ran_within(session: AsyncSession, window: timedelta) -> bool:
+    """Whether a tick committed in the last `window`, by the database's clock.
+
+    The same clock that stamps the heartbeat, so a skewed API clock cannot
+    report a false "stale". False if the scheduler never ran.
+    """
+    fresh = await session.scalar(
+        select(SchedulerHeartbeat.last_success_at > func.now() - window)
+    )
+    return bool(fresh)
