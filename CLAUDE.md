@@ -426,7 +426,23 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
 
 ## Estado actual
 
-- **Fase actual:** **Fase 7 — Alertas e incidentes**, en construcción en la rama `phase-7-alerts-and-incidents`. Plan aprobado por Toni el 2026-11-03, con ADR-059 a ADR-070.
+- **Fase actual:** **Fase 7 — Alertas e incidentes, terminada** el 2026-11-09 (plan aprobado el 2026-11-03, ADR-059 a ADR-070). Está en la rama `phase-7-alerts-and-incidents`, con el PR hacia `main` pendiente de fusionar. **Siguiente fase:** la 8 (interfaz y métricas), que empieza en modo plan (regla 8) cuando Toni lo apruebe.
+- **Hecho en Fase 7:**
+  - migración `0004` (`incidents` y `notifications`, con `first_attempt_at`) y sus modelos, revisada a mano;
+  - `pulseops/incidents.py` (la regla pura) y la detección dentro de `store_check`: candado consultivo por monitor, el check tardío no decide y un solo commit. Pausar o cambiar la URL cierra el incidente sin aviso de "recuperado";
+  - `pulseops/alerts/` (`Notifier`, `TelegramNotifier`, los mensajes y `python -m pulseops.alerts test`) y `AlertSettings`;
+  - el *outbox* con el cron `deliver_notifications` (`pulseops/delivery.py`) en el carril `alerts`, que solo reintenta los fallos temporales. `checks` baja a 29;
+  - la retención de los incidentes cerrados: 1 año;
+  - en la API: `/api/v1/monitors/{id}/incidents`, `/api/v1/incidents` (cursor `i1`), `open_incident` en `/stats` y `/health/scheduler` (con `Cache-Control: no-store`);
+  - Compose (Telegram solo para el worker, opcional), `.env.example`, README (sección "Incidents and alerts") y el smoke test (37/37);
+  - 469 tests (cobertura del 98,29 %), Ruff limpio y `alembic check` limpio;
+  - **prueba manual de Toni con su bot real** (2026-11-09):
+    - le llegaron el mensaje de prueba, el DOWN y el RECOVERED, sin la URL;
+    - se vieron el 400 (chat inexistente) y el 403 (bot bloqueado);
+    - `/health/scheduler` dio 503 con el worker parado;
+    - no aparecen ni el token, ni URLs, ni contraseñas en ningún log.
+
+    El detalle está en `docs/evidence.md`. Para repetir la prueba hay un truco: una web de prueba lanzada con `docker run --rm` y luego apagada da `dns_error`, no `connection_error`, porque el contenedor se borra y el DNS de Docker deja de conocer el nombre. Además hace falta `ALLOW_PRIVATE_TARGETS=true` solo mientras dure la prueba.
 - **Cambios descubiertos en Fase 7 (durante la construcción):**
   - **Convención de nombres:** los `uq_` llevan ahora todas sus columnas (`column_0_N_name`). Si no, el único de `(monitor_id, started_at)` se llamaría `uq_incidents_monitor_id`, como si `monitor_id` fuera único. Los nombres de una sola columna no cambian (`alembic check` limpio).
   - **`with_for_update(key_share=True)` de SQLAlchemy da `FOR NO KEY UPDATE`;** para `FOR KEY SHARE` hace falta además `read=True`. Hay un test que lo fija.
@@ -570,7 +586,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - `ardiq doctor` OK contra Valkey;
   - cambio de httpx a httpx2;
   - ADR-001 a ADR-008.
-- **Pendiente de decidir:** interfaz visual (post-MVP), Nginx o Caddy (Fase 9).
+- **Pendiente de decidir:** interfaz visual (Fase 8), Nginx o Caddy (Fase 9).
 - **Repaso de seguridad previo a la Fase 7 (PR #12, fusionado):**
   - `SECURITY.md` añadido (versiones 0.1.x, aviso por *Report a vulnerability*, respuesta en 7 días como objetivo).
   - `DOCS_ENABLED` pasa a `false` por defecto (código y Compose); `.env.example` lo pone a `true` para desarrollo (ADR-027, enmienda).
@@ -583,23 +599,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - En el VPS (Fase 9), activar `vm.overcommit_memory = 1` en el host, que Valkey lo pide en sus logs.
   - `restart: unless-stopped` solo sirve tras reiniciar el equipo si el demonio de Docker arranca solo. En el VPS (Fase 9), comprobarlo (`systemctl is-enabled docker`).
   - Si la tabla `checks` crece mucho, particionarla por fecha o pasar a TimescaleDB. La PK `(monitor_id, scheduled_at)` ya está preparada para ello.
-- **Siguiente paso** (Fase 7, en pasos pequeños y con cada commit enseñado antes):
-  1. ✅ ADRs y este archivo.
-  2. ✅ Migración `0004` (`incidents`, `notifications`) y modelos, revisada a mano.
-  3. ✅ `pulseops/incidents.py` (la regla pura).
-  4. ✅ Repositorios y `run_check` (candado, check tardío), y cierre al pausar o cambiar la URL.
-  5. ✅ `pulseops/alerts/` (`Notifier`, `TelegramNotifier`, mensaje, comando de prueba) y `AlertSettings`.
-  6. ✅ Cron `deliver_notifications` (`pulseops/delivery.py`), carril `alerts`, solo reintentos temporales y retención de los incidentes de 1 año.
-  7. ✅ API de incidentes (`api/incidents.py`, cursor `i1`), `open_incident` en `/stats` y `/health/scheduler` (`api/health.py`, con `Cache-Control: no-store`).
-  8. ✅ Compose (Telegram solo para el worker, opcional), `.env.example` (vacías = apagadas), README (sección "Incidents and alerts", rutas, diagrama), smoke test (37 casos) y verificaciones en `docs/evidence.md`. **Al cerrar la fase:** fila de la Fase 7 y desglose de tests en `docs/evidence.md`.
-  9. ✅ **Prueba manual de Toni con un bot real** (2026-11-09):
-     - ✅ Toni creó el bot con BotFather, sacó el `chat_id` con `getUpdates` y los puso en su `.env` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`); el worker arrancó con alertas activas.
-     - ✅ `docker compose exec worker python -m pulseops.alerts test` → el mensaje llegó.
-     - ✅ DOWN y RECOVERED reales (22:23–22:26 UTC): monitor "Flaky test site" (30 s) contra el contenedor `pulseops-flaky` (`docker run -d --rm --name pulseops-flaky --network pulseops_default pulseops python -m http.server 8080`). Los dos avisos `sent` al primer intento, 9 s después del check que abrió o cerró el incidente. El fallo sale como `dns_error`, no `connection_error`: con `--rm`, el contenedor parado se borra y el DNS de Docker ya no conoce el nombre.
-     - ✅ `docker compose stop worker` → `/health/scheduler` 503 `stale` en menos de 60 s; al arrancarlo, 200 en 4 s (siempre con `no-store`).
-     - ✅ Logs de `worker`, `postgres`, `api` y `valkey`: 0 coincidencias del token, de la Bot API, de la URL de prueba y de las contraseñas (contado sin imprimirlos).
-     - ✅ Telegram 400 con el bot real (`docker compose exec -e TELEGRAM_CHAT_ID=1 worker python -m pulseops.alerts test`): mensaje claro y salida 1.
-     - ✅ Telegram 403 con el bot real (Toni lo bloqueó un momento): mensaje claro y salida 1.
-     - ✅ Recogida: el contenedor `pulseops-flaky` está borrado y `ALLOW_PRIVATE_TARGETS` ha vuelto a `false` (estuvo en `true` de 22:22 a 22:33 UTC). La API y el worker están recreados, y `http://postgres:5432/` vuelve a dar 422. El monitor "Flaky test site" se pausó para que Toni viera su incidente en la API y después se borró, y su incidente y sus avisos se fueron con él por la cascada.
-     - ✅ Toni confirmó que los dos mensajes llegaron con el nombre, el id, `dns_error`, el inicio y la duración en UTC, y **sin la URL**. El bot vuelve a estar desbloqueado.
-     - Después: cerrar la fase (fila de la Fase 7 y desglose de tests en `docs/evidence.md`, "Estado actual" completo, PR hacia `main`).
+- **Siguiente paso:**
+  1. **Cerrar la Fase 7:** push de la rama y PR hacia `main` (con el OK de Toni), CI en verde, y Toni lo fusiona. La fila de la Fase 7 en `docs/evidence.md` dice "PR #18, 2026-11-09". Si el número o la fecha de la fusión no coinciden, hay que corregirla.
+  2. **Revisar los PR de Dependabot** que llegaron durante la Fase 7: #16 (uv 0.13.7, en la imagen y en CI) y #17 (Ruff 0.17.4).
+  3. **Fase 8 (interfaz y métricas):** empezar en modo plan (regla 8) cuando Toni lo apruebe.
