@@ -204,6 +204,10 @@ Not covered, on purpose: the real database session factory (tests substitute the
 | SQLAlchemy 2.1: `with_for_update(key_share=True)` renders `FOR NO KEY UPDATE`; `FOR KEY SHARE` needs `read=True` as well | `store_check` reads the monitor with `read=True, key_share=True`; `test_the_monitor_row_lock_is_key_share` |
 | SQLAlchemy autoflush: running any statement first flushes the session's pending ORM changes, so a unique violation of those changes is raised by that statement, not by the later commit | When a URL changes, the open incident is closed before the monitor's fields are touched, so a duplicate URL is still a 409 (`test_patch_url_to_an_existing_one_is_a_conflict` caught the 500) |
 | PostgreSQL 18: `pulseops_app` can take transaction-level advisory locks (`pg_advisory_xact_lock(int, int)`); the lock shows in `pg_locks` and is released on commit | Incident evaluation takes turns per monitor (ADR-061); `test_app_role_can_take_transaction_advisory_locks` |
+| httpx2 2.16 logs `HTTP Request: POST <full URL>` at INFO also through a `MockTransport`; for the Bot API that URL holds the bot token | `pulseops/alerts/telegram.py` raises the `httpx2` and `httpcore2` loggers to WARNING itself |
+| In the test process, importing `pulseops.main` loads the checker, which silences httpx2 for the whole process: a module's own logging guard is never exercised there | `test_importing_alerts_alone_silences_httpx2` checks it in a fresh interpreter, as `python -m pulseops.alerts test` runs (it fails with the guard removed) |
+| httpx2 2.16: a client given an explicit transport never builds proxy routes from `HTTP(S)_PROXY`; without one, `trust_env=True` builds a route through the proxy and `trust_env=False` none | A fake transport cannot prove that proxies are ignored: `test_proxy_variables_are_ignored` inspects the real client instead |
+| pydantic-settings 2.16: an empty variable (`TELEGRAM_BOT_TOKEN=`) is read as an empty string, not as unset, unless `env_ignore_empty=True` | `AlertSettings` sets it, so `.env.example`'s empty values mean "alerts off"; `test_empty_values_mean_not_set` fails without it |
 
 ## Query performance (2026-10-28)
 

@@ -426,6 +426,11 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - **El *autoflush* adelanta los errores:** cualquier sentencia guarda antes los cambios pendientes del ORM. Al cambiar la URL, cerrar el incidente *después* de tocar el monitor hacía saltar el `uq_monitors_url` fuera de `_commit` → un 500 en vez del 409 (lo detectó `test_patch_url_to_an_existing_one_is_a_conflict`). Ahora se cierra el incidente antes de tocar los campos.
   - **`store_check` lee el monitor con `FOR KEY SHARE`** antes de insertar: un monitor borrado ya no provoca un error de clave foránea que haya que capturar. `record_check` ya no hace commit ni captura ese error.
   - **Un test de concurrencia que no demostraba nada:** sin candado, las dos tareas acababan en orden y el test seguía pasando. Ahora cada `store_check` espera entre evaluar y hacer commit (con `monkeypatch`), y sin candado el test falla, como debe. Comprobado rompiendo el código a propósito: sin el candado, sin la regla del check tardío, sin `not_before`, con la pausa sin candado y con `FOR UPDATE`, su test falla en cada caso.
+  - **httpx2 escribe la URL completa (con el token del bot) a nivel INFO,** también con `MockTransport`. `alerts/telegram.py` silencia httpx2 por su cuenta. **Dentro de pytest eso no se ponía a prueba:** al importar `pulseops.main` se carga el comprobador, que silencia httpx2 para todo el proceso. Ahora lo comprueba un test en un intérprete limpio, como corre `python -m pulseops.alerts test`.
+  - **Con un *transport* inyectado, httpx2 ignora las variables de proxy.** Un test con `MockTransport` no podía demostrar `trust_env=False`; el test mira el cliente real.
+  - **pydantic-settings lee `TELEGRAM_BOT_TOKEN=` (vacío) como texto vacío,** no como "sin poner", salvo con `env_ignore_empty=True`. Sin eso, el `.env.example` con valores vacíos impediría arrancar el worker.
+  - **El nombre de un monitor admite saltos de línea** (la API solo limita la longitud). En los avisos se convierten en espacios, para que un nombre no pueda colar una línea falsa ("RECOVERED").
+  - **`AlertSettings` pasa del paso 6 al 5:** el comando de prueba ya lo necesita.
 - **Antes:** MVP completo con la release v0.1.0 (2026-10-28) y el repo **público**. Fase 6 cerrada (PR #7 y PR #11). Después vinieron el repaso de seguridad (PR #12), las dependencias de Dependabot (PR #13 y #14) y la documentación de ArdiQ 1.2.1 (PR #15).
 - **Hecho en Fase 6:**
   - `.github/workflows/ci.yml` con los jobs `lint`, `test` y `stack`, en verde en GitHub;
@@ -566,8 +571,8 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   3. ✅ `pulseops/incidents.py` (la regla pura).
   4. ✅ Repositorios y `run_check` (candado, check tardío), y cierre al pausar o cambiar la URL.
      - **Pendiente para el paso 6:** la retención de los incidentes cerrados hace más de 1 año (ADR-062), en el cron de limpieza.
-  5. `pulseops/alerts/` (`Notifier`, `TelegramNotifier`, mensaje y comando de prueba).
-  6. Cron `deliver_notifications`, carril `alerts` y `AlertSettings`.
+  5. ✅ `pulseops/alerts/` (`Notifier`, `TelegramNotifier`, mensaje, comando de prueba) y `AlertSettings`.
+  6. Cron `deliver_notifications` y carril `alerts`.
   7. API de incidentes, `open_incident` y `/health/scheduler`.
   8. Compose, `.env.example`, README, smoke test y `docs/evidence.md`.
   9. Prueba manual de Toni con un bot real; antes, explicarle paso a paso cómo crear el bot con BotFather y sacar el `chat_id`.
