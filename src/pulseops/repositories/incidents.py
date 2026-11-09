@@ -1,8 +1,8 @@
 """Incidents and the alerts written with them (ADR-061 to ADR-063)."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pulseops.db.models import Incident, Notification
@@ -90,3 +90,18 @@ async def close_open_incident(
     )
     result = await session.execute(statement)
     return result.rowcount > 0
+
+
+async def delete_expired_incidents(
+    session: AsyncSession, *, retention: timedelta
+) -> int:
+    """Delete incidents resolved more than `retention` ago, with their alerts.
+
+    One statement: incidents are few (one row per outage). Open incidents are
+    never deleted, however old.
+    """
+    result = await session.execute(
+        delete(Incident).where(Incident.resolved_at < func.now() - retention)
+    )
+    await session.commit()
+    return result.rowcount

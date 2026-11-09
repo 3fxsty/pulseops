@@ -1,15 +1,29 @@
-"""The worker's ArdiQ tasks: thin wrappers around pulseops.scheduling and
-pulseops.retention."""
+"""The worker's ArdiQ tasks: thin wrappers around pulseops.scheduling,
+pulseops.retention and pulseops.delivery."""
 
 import logging
 from collections.abc import Sequence
+from contextlib import AsyncExitStack
 
+from pulseops.alerts import TelegramNotifier
+from pulseops.alerts.telegram import SEND_DEADLINE_SECONDS
 from pulseops.checker import Checker
-from pulseops.config import get_settings
+from pulseops.config import AlertSettings, get_settings
 from pulseops.db.session import get_engine, get_sessionmaker
-from pulseops.queue.app import CHECKS_LANE, MAINTENANCE_LANE, SCHEDULER_LANE, app
+from pulseops.delivery import RUN_BUDGET_SECONDS, deliver_due_alerts
+from pulseops.queue.app import (
+    ALERTS_LANE,
+    CHECKS_LANE,
+    MAINTENANCE_LANE,
+    SCHEDULER_LANE,
+    app,
+)
 from pulseops.repositories.scheduling import DueCheck
-from pulseops.retention import MAX_RUN_SECONDS, purge_expired_checks
+from pulseops.retention import (
+    MAX_RUN_SECONDS,
+    purge_expired_checks,
+    purge_expired_incidents,
+)
 from pulseops.scheduling import run_check, schedule_due_checks
 from pulseops.timestamps import from_microseconds, to_microseconds
 
@@ -22,17 +36,43 @@ RETENTION_EVERY_SECONDS = 3600
 # Safety net above the cleanup's own 60 s budget, which stops between batches;
 # this one would cut a batch short, so it should never be reached.
 RETENTION_TASK_TIMEOUT_SECONDS = MAX_RUN_SECONDS + 30
+DELIVERY_EVERY_SECONDS = 5
+# Safety net above a run's own budget plus the last send's deadline.
+DELIVERY_TASK_TIMEOUT_SECONDS = RUN_BUDGET_SECONDS + SEND_DEADLINE_SECONDS + 20
 
 
 @app.lifespan
 async def resources():
-    """One checker (shared TLS setup) and one connection pool per worker."""
+    """One checker, one alert channel and one connection pool per worker.
+
+    Invalid alert settings stop the worker here, at start-up (ADR-066).
+    """
     settings = get_settings()
+    alert_settings = AlertSettings()
     try:
-        async with Checker(
-            allow_private_targets=settings.allow_private_targets
-        ) as checker:
-            yield {"checker": checker, "sessions": get_sessionmaker()}
+        async with AsyncExitStack() as stack:
+            checker = await stack.enter_async_context(
+                Checker(allow_private_targets=settings.allow_private_targets)
+            )
+            notifier = None
+            if alert_settings.enabled:
+                notifier = await stack.enter_async_context(
+                    TelegramNotifier(
+                        token=alert_settings.telegram_bot_token,
+                        chat_id=alert_settings.telegram_chat_id,
+                    )
+                )
+            else:
+                # Incidents are still recorded; their alerts become skipped.
+                logger.warning(
+                    "alerts are off: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID "
+                    "to send them"
+                )
+            yield {
+                "checker": checker,
+                "notifier": notifier,
+                "sessions": get_sessionmaker(),
+            }
     finally:
         await get_engine().dispose()
 
@@ -99,10 +139,35 @@ async def schedule_checks() -> int:
     timeout=RETENTION_TASK_TIMEOUT_SECONDS,
 )
 async def delete_expired() -> int:
-    """Every hour: delete checks older than 30 days, for at most 60 s."""
+    """Every hour: delete checks older than 30 days, for at most 60 s, then
+    incidents resolved more than a year ago (one quick statement)."""
     try:
-        return await purge_expired_checks(app.state.sessions)
+        checks = await purge_expired_checks(app.state.sessions)
+        return checks + await purge_expired_incidents(app.state.sessions)
     except Exception as error:
         # Batches already deleted stay deleted; the next run picks up the rest.
         logger.error("retention failed, retrying next run: %r", error)
+        return 0
+
+
+@app.cron(
+    every=DELIVERY_EVERY_SECONDS,
+    coalesce=True,
+    name="deliver_notifications",
+    # Its own lane (limit 1): slow alerts never take the scheduler's slot.
+    priority=ALERTS_LANE,
+    max_retries=0,
+    timeout=DELIVERY_TASK_TIMEOUT_SECONDS,
+)
+async def deliver_notifications() -> int:
+    """Every 5 s: send the pending alerts (ADR-063)."""
+    try:
+        return await deliver_due_alerts(app.state.sessions, app.state.notifier)
+    except Exception as error:
+        # The next run picks up where this one stopped. Only the type is
+        # logged: an unexpected error from the alert channel might quote the
+        # Bot API URL, which holds the token.
+        logger.error(
+            "alert delivery failed, retrying next run: %s", type(error).__name__
+        )
         return 0

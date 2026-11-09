@@ -369,8 +369,10 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
       - un aviso `opened` / `resolved` por incidente, con estado `pending` / `sent` / `failed` / `skipped`;
       - el cron `deliver_notifications`, cada 5 s, reclama con `SKIP LOCKED` y una reserva de 60 s, hace commit y después envía: **sin conexión de BD abierta durante el envío**;
       - **cada envío acaba muy dentro de su reserva** (condición de Toni): un plazo total de 10 s por envío (`asyncio.timeout`, porque los timeouts de httpx2 son por fase) y cada aviso se reclama justo antes de enviarlo, de uno en uno. Un test comprueba que la reserva es al menos 3 veces el plazo y que un envío colgado se corta;
-      - reintentos de 10 s creciendo hasta 1 h, y respeta el `retry_after` del 429;
-      - **se rinde** tras 20 intentos o 24 h → `failed`, con un log ERROR sin token ni URL;
+      - **solo se reintentan los fallos temporales** (decisión de Toni, 2026-11-09): red, timeout, 429 y 5xx, esperando 10 s y creciendo hasta 1 h, o lo que diga el `retry_after` del 429;
+      - **un fallo permanente** (400, 401, 403, 404…: token inválido, chat inexistente, bot bloqueado) pasa a `failed` al momento, con un log ERROR que dice el problema, sin token ni URL. Punto débil: arreglar el token no recupera los avisos fallidos mientras tanto (los incidentes sí quedan en la API);
+      - **los reintentos se rinden** tras 20 intentos o **24 h desde el primer intento** (columna `first_attempt_at`) → `failed`, con un log ERROR sin token ni URL. Si el siguiente reintento caería fuera de las 24 h, se rinde en ese momento;
+      - **un aviso se descarta por inútil, nunca por viejo** (decisión de Toni, 2026-11-09): un DOWN con el incidente aún abierto se envía siempre (si no, una caída anterior a un parón del worker no avisaría nunca); un DOWN con el incidente ya cerrado pasa a `skipped` (el RECOVERED lleva inicio y duración; si se cerró por pausa o cambio de URL, lo hizo la propia persona); el RECOVERED se envía siempre;
       - "resuelto" **espera** mientras "abierto" siga `pending`;
       - sin bot configurado → `skipped`.
     - **Telegram:** Bot API directa con httpx2 detrás de `Notifier`. Dirección fija, `trust_env=False`, TLS verificado, texto plano.
@@ -431,6 +433,11 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - **pydantic-settings lee `TELEGRAM_BOT_TOKEN=` (vacío) como texto vacío,** no como "sin poner", salvo con `env_ignore_empty=True`. Sin eso, el `.env.example` con valores vacíos impediría arrancar el worker.
   - **El nombre de un monitor admite saltos de línea** (la API solo limita la longitud). En los avisos se convierten en espacios, para que un nombre no pueda colar una línea falsa ("RECOVERED").
   - **`AlertSettings` pasa del paso 6 al 5:** el comando de prueba ya lo necesita.
+  - **Respuestas reales de Telegram** (2026-11-09, con tokens inventados): un token con buena forma pero falso da `401 Unauthorized`; uno mal formado, `404 Not Found`. El 400 (chat inexistente) y el 403 (bot bloqueado) necesitan un bot real: **comprobarlos en la prueba manual (paso 9)**.
+  - **Con tres carriles, `checks` en 30 deja al planificador sin hueco** (29 + 1 + 1 + el suyo = 32). Comprobado contra Valkey real.
+  - **Los tests del worker fuerzan las alertas apagadas** (`AlertSettings` sustituido en el fixture): si el `.env` de desarrollo tuviera un token real, ningún test podría escribir a ese bot.
+  - **Las 24 h de reintentos se cuentan desde el primer intento, no desde que se creó el aviso:** si no, un DOWN que esperó a un worker parado tendría un solo intento si Telegram fallaba justo entonces. Hizo falta la columna `first_attempt_at`, añadida en la propia `0004`, que aún no había salido de la rama (la BD de desarrollo se rehízo con `downgrade 0003` + `upgrade`; tenía 0 incidentes y 0 avisos).
+  - **El cron de reparto solo registra el *tipo* de un error inesperado,** no su mensaje: un fallo del canal podría citar la URL de la Bot API, que lleva el token.
 - **Antes:** MVP completo con la release v0.1.0 (2026-10-28) y el repo **público**. Fase 6 cerrada (PR #7 y PR #11). Después vinieron el repaso de seguridad (PR #12), las dependencias de Dependabot (PR #13 y #14) y la documentación de ArdiQ 1.2.1 (PR #15).
 - **Hecho en Fase 6:**
   - `.github/workflows/ci.yml` con los jobs `lint`, `test` y `stack`, en verde en GitHub;
@@ -570,9 +577,8 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   2. ✅ Migración `0004` (`incidents`, `notifications`) y modelos, revisada a mano.
   3. ✅ `pulseops/incidents.py` (la regla pura).
   4. ✅ Repositorios y `run_check` (candado, check tardío), y cierre al pausar o cambiar la URL.
-     - **Pendiente para el paso 6:** la retención de los incidentes cerrados hace más de 1 año (ADR-062), en el cron de limpieza.
   5. ✅ `pulseops/alerts/` (`Notifier`, `TelegramNotifier`, mensaje, comando de prueba) y `AlertSettings`.
-  6. Cron `deliver_notifications` y carril `alerts`.
+  6. ✅ Cron `deliver_notifications` (`pulseops/delivery.py`), carril `alerts`, solo reintentos temporales y retención de los incidentes de 1 año.
   7. API de incidentes, `open_incident` y `/health/scheduler`.
   8. Compose, `.env.example`, README, smoke test y `docs/evidence.md`.
   9. Prueba manual de Toni con un bot real; antes, explicarle paso a paso cómo crear el bot con BotFather y sacar el `chat_id`.
