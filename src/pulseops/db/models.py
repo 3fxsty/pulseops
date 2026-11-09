@@ -243,6 +243,10 @@ class Notification(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     # When it may be tried next. A claim pushes it 60 s ahead (a lease).
     next_attempt_at: Mapped[datetime] = mapped_column(server_default=func.now())
+    # When it was first tried: retries stop 24 h after it (ADR-063). Counted
+    # from here, not from created_at, so an alert that waited (e.g. with the
+    # worker stopped) still gets its full day of retries.
+    first_attempt_at: Mapped[datetime | None]
     # When it became sent, failed or skipped.
     finished_at: Mapped[datetime | None]
 

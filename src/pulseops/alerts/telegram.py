@@ -21,6 +21,16 @@ TELEGRAM_API_URL = "https://api.telegram.org"
 # (ADR-063). httpx2's own timeouts apply per phase and could add up to more.
 SEND_DEADLINE_SECONDS = 10.0
 
+# What a permanent answer means, for the worker's ERROR line (ADR-063). 401 and
+# 404 checked against the real Bot API with made-up tokens.
+PERMANENT_PROBLEMS = {
+    400: "Telegram rejected the message (for example, the chat does not exist)",
+    401: "the bot token is not valid",
+    403: "the bot cannot write to the chat (blocked, or removed from it)",
+    404: "the bot token is not valid (malformed)",
+}
+UNEXPECTED_ANSWER = "Telegram refused the alert"
+
 # httpx2 logs every request URL at INFO, and here the URL holds the token.
 for _name in ("httpx2", "httpcore2"):
     logging.getLogger(_name).setLevel(logging.WARNING)
@@ -66,12 +76,21 @@ class TelegramNotifier:
         except httpx2.HTTPError:
             raise DeliveryError("connection_error") from None
 
-        if response.status_code == 429:
+        status = response.status_code
+        if status == 429:
             raise DeliveryError(
                 "rate_limited", status_code=429, retry_after=_retry_after(response)
             )
-        if response.status_code != 200 or not _answered_ok(response):
-            raise DeliveryError("http_error", status_code=response.status_code)
+        if status >= 500:
+            # Telegram's side: worth trying again.
+            raise DeliveryError("http_error", status_code=status)
+        if status != 200 or not _answered_ok(response):
+            # Any other answer would come back the same on every retry.
+            raise DeliveryError(
+                "http_error",
+                status_code=status,
+                problem=PERMANENT_PROBLEMS.get(status, UNEXPECTED_ANSWER),
+            )
 
     async def aclose(self) -> None:
         await self._client.aclose()

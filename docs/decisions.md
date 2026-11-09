@@ -1470,7 +1470,7 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 - **Table `notifications`** (migration `0004`):
   - `incident_id` (FK, `ON DELETE CASCADE`), `kind` (`opened` or `resolved`), unique together: one alert of each kind per incident;
   - `status`, a closed list: `pending`, `sent`, `failed`, `skipped`;
-  - `attempts`, `created_at`, `next_attempt_at`, `finished_at`;
+  - `attempts`, `created_at`, `next_attempt_at`, `first_attempt_at` (stamped by the first claim), `finished_at`;
   - a partial index on `next_attempt_at WHERE status = 'pending'`.
   - A `resolved` alert is only written for `resolution = 'recovered'`.
 - **Cron `deliver_notifications` every 5 s,** on its own lane (ADR-070), in small batches:
@@ -1479,8 +1479,16 @@ The roles and databases are created by an init script in `docker-entrypoint-init
     - **one total deadline of 10 s per send** (`asyncio.timeout`), as for checks (ADR-033). httpx2's own timeouts apply per phase (connect, read…) and could add up to more than that;
     - **each alert is claimed just before it is sent,** one at a time, so every send starts with a full 60 s lease. Claiming a batch first would let the lease of the last alerts run out while the earlier ones are sent;
     - **tested:** the lease is at least 3 times the deadline, and a send that hangs is cut at the deadline.
-  - **Retries with a growing wait:** 10 s, 20 s, 40 s… capped at 1 h. A Telegram 429 schedules the next attempt after its `retry_after`.
-  - **Giving up** (requested by the project owner): after **20 attempts** or **24 h** since it was created, whichever comes first, the alert becomes `failed` and the worker logs an ERROR with ids, kind and attempts only, never the token or a URL. No endless retries.
+  - **Only temporary failures are retried** (requested by the project owner): a network error, a timeout, a 429 or a 5xx. They wait 10 s, 20 s, 40 s… capped at 1 h, and a 429 waits for its `retry_after` instead.
+  - **A permanent failure fails at once:** any other answer (400, 401, 403, 404…: an invalid token, a chat that does not exist, a bot blocked or removed from the chat) makes the alert `failed` on the spot. The worker logs an ERROR that says what the problem is (for example, "the bot token is not valid") with ids, kind and HTTP status only, never the token or a URL.
+  - **Giving up on retries** (requested by the project owner): after **20 attempts** or **24 h since the first attempt**, whichever comes first, a temporary failure also becomes `failed`, with the same kind of ERROR. No endless retries.
+    - **Counted from the first attempt, not from creation:** an alert that waited (for example, with the worker stopped for a day) still gets its full 24 h of retries if Telegram fails when it is finally tried.
+    - **No retry is scheduled past the window:** if the next wait (for example, a long 429 `retry_after`) would end after the 24 h, the alert fails at once, so the ERROR is not hours late.
+    - **An alert claimed more than 20 times** without an answer (a worker dying mid-send again and again: every claim counts) fails without being sent.
+  - **An alert is dropped when it is no longer useful, never for its age alone** (requested by the project owner, 2026-11-09):
+    - **"DOWN" while its incident is still open: sent, however old.** It is still true and carries the start time. Dropping it would leave a site that went down before a stop of the worker without any alert: no second "DOWN" is ever written for the same incident.
+    - **"DOWN" once its incident is over: `skipped`.** The "RECOVERED" alert carries the start and the duration, so a late "DOWN" would only be noise. The same for an incident closed by a pause or a new URL, which has no "RECOVERED": the person made that change.
+    - **"RECOVERED": always sent,** so nobody is left believing a site is still down.
   - **Order within an incident** (requested by the project owner): a `resolved` alert is not sent while the `opened` one is still `pending`. Once the `opened` one has ended (`sent`, `failed` or `skipped`), the `resolved` one may go: it carries the start time and the duration, so it is understandable on its own.
   - **Without a bot configured,** pending alerts become `skipped` (ADR-066).
 - **Delivery guarantee: at least once.** A duplicate needs Telegram to accept a message and PulseOps to fail right before recording it.
@@ -1491,7 +1499,10 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 - **One ArdiQ task per alert:** ties storing a check to Valkey once more.
 - **Holding the row lock during the send:** simpler, but a database connection would wait on Telegram for up to 10 s.
 
-**Weak point.** Up to 5 s of extra delay, one more table and one more cron.
+**Weak point.**
+- Up to 5 s of extra delay, one more table and one more cron.
+- **A late "DOWN" is skipped in favour of its "RECOVERED":** if that "RECOVERED" then fails for good, the outage is announced by neither, though it is still recorded in the API.
+- **A permanent failure is final, even after the cause is fixed:** while the token is wrong or the bot is blocked, every alert fails at once and is never sent again, so fixing the setting does not bring back the alerts missed meanwhile (the incidents themselves are still recorded and visible in the API). The ERROR in the worker's log is the signal to look at, and `python -m pulseops.alerts test` checks a fix at once. Retrying those failures would not help: the same answer would come back until someone changes the setting.
 
 **Reversibility.** Medium: it is schema.
 

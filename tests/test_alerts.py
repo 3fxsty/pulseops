@@ -193,17 +193,50 @@ async def test_a_rate_limit_without_any_wait_leaves_it_to_the_retry_policy():
     assert (await failure(FakeTelegram(answer(429, {"ok": False})))).retry_after is None
 
 
-@pytest.mark.parametrize("status", [400, 401, 403, 500, 502])
-async def test_an_error_answer_is_an_http_error(status):
+@pytest.mark.parametrize("status", [500, 502, 503])
+async def test_a_server_error_is_temporary(status):
     error = await failure(FakeTelegram(answer(status, {"ok": False})))
 
     assert (error.reason, error.status_code) == ("http_error", status)
+    assert error.permanent is False
 
 
-async def test_a_200_that_is_not_ok_is_an_http_error():
+@pytest.mark.parametrize(
+    ("status", "problem"),
+    [
+        (400, "Telegram rejected the message (for example, the chat does not exist)"),
+        (401, "the bot token is not valid"),
+        (403, "the bot cannot write to the chat (blocked, or removed from it)"),
+        (404, "the bot token is not valid (malformed)"),
+        (409, "Telegram refused the alert"),
+    ],
+)
+async def test_any_other_error_is_permanent_and_says_why(status, problem):
+    error = await failure(FakeTelegram(answer(status, {"ok": False})))
+
+    assert (error.reason, error.status_code, error.permanent) == (
+        "http_error",
+        status,
+        True,
+    )
+    assert str(error) == f"http_error (HTTP {status}): {problem}"
+    assert not leaks_token(error)
+
+
+async def test_a_200_that_is_not_ok_is_permanent():
     error = await failure(FakeTelegram(answer(200, {"ok": False})))
 
-    assert (error.reason, error.status_code) == ("http_error", 200)
+    assert (error.status_code, error.permanent) == (200, True)
+
+
+async def test_network_failures_and_rate_limits_are_temporary():
+    def refuse(request):
+        raise httpx2.ConnectError("refused", request=request)
+
+    refused = await failure(FakeTelegram(refuse))
+    limited = await failure(FakeTelegram(answer(429, {"ok": False})))
+
+    assert (refused.permanent, limited.permanent) == (False, False)
 
 
 async def test_redirects_are_never_followed():
@@ -214,7 +247,11 @@ async def test_redirects_are_never_followed():
 
     error = await failure(telegram)
 
-    assert (error.reason, error.status_code) == ("http_error", 302)
+    assert (error.reason, error.status_code, error.permanent) == (
+        "http_error",
+        302,
+        True,
+    )
     assert len(telegram.requests) == 1
 
 
@@ -239,7 +276,7 @@ async def test_a_send_that_hangs_is_cut_at_the_deadline():
         with pytest.raises(DeliveryError) as error:
             await notifier.send("Hello")
 
-    assert error.value.reason == "timeout"
+    assert (error.value.reason, error.value.permanent) == ("timeout", False)
     assert time.perf_counter() - started < 1
     assert not leaks_token(error.value)
 
