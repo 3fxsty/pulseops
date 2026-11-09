@@ -379,8 +379,13 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
     - **Mensaje:** nombre, `public_id`, `error_kind`, código HTTP, inicio y duración, en UTC. Nunca la URL ni el `error_detail`.
     - **`AlertSettings`** (solo worker): `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID`, opcionales, los dos o ninguno. Comando `python -m pulseops.alerts test`.
     - **Anti-spam:** un mensaje por evento, respetando el 429, sin recordatorios.
-    - **`GET /health/scheduler`** (sin API key): 200 `ok` si el último turno tiene menos de 60 s; 503 `stale` o `unavailable`; sin la hora. `/health` no cambia.
-    - **API:** `GET /api/v1/monitors/{id}/incidents` y `GET /api/v1/incidents?state=open|resolved` (lista cerrada, otro valor → 422), con cursor opaco sobre `(started_at, public_id)`; `open_incident` en `/stats`.
+    - **`GET /health/scheduler`** (sin API key): 200 `ok` si el último turno tiene menos de 60 s; 503 `stale`, o `unavailable` si la BD no responde en 3 s; JSON simple como `/health` (no RFC 9457), con `Cache-Control: no-store` (condición de Toni) y sin la hora. `/health` no cambia.
+    - **API** (formas aprobadas el 2026-11-09):
+      - `GET /api/v1/monitors/{id}/incidents` y `GET /api/v1/incidents?state=open|resolved` (lista cerrada, otro valor → 422);
+      - páginas `{items, next_cursor}`; un incidente es `{id, started_at, resolved_at, error_kind, status_code, resolution}`; en la lista global, además, `monitor: {id, name}` (anidado);
+      - sin campos calculados (`duration_seconds`, `state`): añadir es fácil, quitar rompe;
+      - cursor opaco `base64url` de `i1:<µs>:<id del incidente>`, uno para las dos listas;
+      - `open_incident` (`id`, `started_at`, `error_kind`, `status_code`) en `/stats`, detrás de `last_check`.
     - **Carril `alerts`** (límite 1); `checks` baja a 29. Se comprueba contra Valkey real.
   - Terminada cuando:
     - Toni recibe en Telegram el aviso de caída y el de recuperación, sin URL ni token en los mensajes ni en los logs;
@@ -437,6 +442,8 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - **Con tres carriles, `checks` en 30 deja al planificador sin hueco** (29 + 1 + 1 + el suyo = 32). Comprobado contra Valkey real.
   - **Los tests del worker fuerzan las alertas apagadas** (`AlertSettings` sustituido en el fixture): si el `.env` de desarrollo tuviera un token real, ningún test podría escribir a ese bot.
   - **Las 24 h de reintentos se cuentan desde el primer intento, no desde que se creó el aviso:** si no, un DOWN que esperó a un worker parado tendría un solo intento si Telegram fallaba justo entonces. Hizo falta la columna `first_attempt_at`, añadida en la propia `0004`, que aún no había salido de la rama (la BD de desarrollo se rehízo con `downgrade 0003` + `upgrade`; tenía 0 incidentes y 0 avisos).
+  - **Conectar a un puerto local cerrado no siempre se rechaza al momento:** en la máquina de desarrollo, asyncpg se quedó colgado 60 s (su timeout de conexión) contra `127.0.0.1:1`. Es justo el caso que cubre el plazo de 3 s de `/health/scheduler`.
+  - **`/health` se mueve a `api/health.py`,** junto a `/health/scheduler`, sin cambiar su comportamiento.
   - **El cron de reparto solo registra el *tipo* de un error inesperado,** no su mensaje: un fallo del canal podría citar la URL de la Bot API, que lleva el token.
 - **Antes:** MVP completo con la release v0.1.0 (2026-10-28) y el repo **público**. Fase 6 cerrada (PR #7 y PR #11). Después vinieron el repaso de seguridad (PR #12), las dependencias de Dependabot (PR #13 y #14) y la documentación de ArdiQ 1.2.1 (PR #15).
 - **Hecho en Fase 6:**
@@ -579,6 +586,6 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   4. ✅ Repositorios y `run_check` (candado, check tardío), y cierre al pausar o cambiar la URL.
   5. ✅ `pulseops/alerts/` (`Notifier`, `TelegramNotifier`, mensaje, comando de prueba) y `AlertSettings`.
   6. ✅ Cron `deliver_notifications` (`pulseops/delivery.py`), carril `alerts`, solo reintentos temporales y retención de los incidentes de 1 año.
-  7. API de incidentes, `open_incident` y `/health/scheduler`.
+  7. ✅ API de incidentes (`api/incidents.py`, cursor `i1`), `open_incident` en `/stats` y `/health/scheduler` (`api/health.py`, con `Cache-Control: no-store`).
   8. Compose, `.env.example`, README, smoke test y `docs/evidence.md`.
   9. Prueba manual de Toni con un bot real; antes, explicarle paso a paso cómo crear el bot con BotFather y sacar el `chat_id`.

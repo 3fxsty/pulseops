@@ -9,19 +9,24 @@ from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from pulseops.api.cursors import InvalidCursorError, decode_cursor, encode_cursor
 from pulseops.api.deps import SessionDep, SettingsDep, require_api_key
 from pulseops.api.errors import invalid_cursor, monitor_not_found
+from pulseops.api.incidents import Cursor, Limit, incident_page
 from pulseops.api.schemas import (
     CheckPage,
     CheckRead,
+    IncidentPage,
+    IncidentRead,
     MonitorCreate,
     MonitorPage,
     MonitorRead,
     MonitorStats,
     MonitorUpdate,
+    OpenIncidentRead,
     Period,
     Problem,
 )
 from pulseops.db.models import Monitor
 from pulseops.repositories import checks as checks_repository
+from pulseops.repositories import incidents as incidents_repository
 from pulseops.repositories import monitors as repository
 from pulseops.security.validation import validate_monitor_url
 from pulseops.status import current_status
@@ -183,6 +188,7 @@ async def get_monitor_stats(
     stats = await checks_repository.check_stats(
         session, monitor_id=monitor.id, period=PERIODS[period]
     )
+    incident = await incidents_repository.get_open_incident(session, monitor.id)
     return MonitorStats(
         status=current_status(
             is_active=monitor.is_active,
@@ -192,6 +198,7 @@ async def get_monitor_stats(
             now=stats.until,
         ),
         last_check=CheckRead.from_model(last) if last else None,
+        open_incident=OpenIncidentRead.from_model(incident) if incident else None,
         period=period,
         since=stats.since,
         to=stats.until,
@@ -202,6 +209,27 @@ async def get_monitor_stats(
         checks_total=stats.total,
         checks_up=stats.up,
         checks_down=stats.total - stats.up,
+    )
+
+
+@router.get(
+    "/{id}/incidents",
+    responses={404: PROBLEM},
+    summary="List a monitor's incidents, newest first",
+)
+async def list_monitor_incidents(
+    monitor: MonitorDep,
+    session: SessionDep,
+    limit: Limit = 50,
+    cursor: Cursor = None,
+) -> IncidentPage:
+    # The monitor comes from the URL, never from the cursor.
+    page, next_cursor = await incident_page(
+        session, limit=limit, cursor=cursor, monitor_id=monitor.id
+    )
+    return IncidentPage(
+        items=[IncidentRead.from_model(row.Incident) for row in page],
+        next_cursor=next_cursor,
     )
 
 

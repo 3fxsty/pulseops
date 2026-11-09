@@ -1609,7 +1609,9 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 - **A new route, `GET /health/scheduler`, without the API key,** for an outside monitor to poll:
   - **200 `{"status": "ok"}`** if the last tick is less than 60 s old (12 ticks), measured with the database's clock;
   - **503 `{"status": "stale"}`** if it is older, or the scheduler never ran;
-  - **503 `{"status": "unavailable"}`** if the database cannot be reached, without any error detail;
+  - **503 `{"status": "unavailable"}`** if the database does not answer within **3 s**, without any error detail. Without that deadline the request could hang for a minute (asyncpg's default connect timeout), and the outside monitor would learn nothing;
+  - **plain JSON, like `/health`, not an RFC 9457 problem:** it is a probe for an outside monitor, not an API error (decided 2026-11-09);
+  - **`Cache-Control: no-store`** on every answer (requested by the project owner, 2026-11-09), so no proxy or cache can keep serving an old "ok" while the scheduler is down;
   - **no timestamp in the answer:** it is worth nothing to someone without the key.
 - **Who watches it:** an outside uptime monitor or a dead man's switch, set up in Phase 9. Until then the API only listens on `127.0.0.1`, so in this phase the route exists and is tested.
 - **Noted for Phase 9:** without the API key and reading the database, it needs the reverse proxy's request rate limit.
@@ -1619,7 +1621,9 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 - **The API sending the alert itself:** it would need the bot token.
 - **The scheduler pinging an outside dead man's switch on every tick:** an outside dependency, better decided in Phase 9.
 
-**Weak point.** Until Phase 9 nothing polls it automatically.
+**Weak point.**
+- Until Phase 9 nothing polls it automatically.
+- With a very slow database (over 3 s), it answers `unavailable` even if the scheduler works.
 
 **Reversibility.** Hard: outside monitors will point at this route.
 
@@ -1638,14 +1642,24 @@ The roles and databases are created by an init script in `docker-entrypoint-init
 | `GET /api/v1/incidents?state=open&limit=50&cursor=…` | Incidents across monitors, newest first, each with the monitor's `id` and `name` |
 | `GET /api/v1/monitors/{id}/stats` | Adds `open_incident` (`id`, `started_at`, `error_kind`, `status_code`), `null` when there is none |
 
-- **`state` is a closed list:** `open` or `resolved` (requested by the project owner). Any other value is a 422; without it, both.
+- **Shapes, approved on 2026-11-09:**
+  - **Pages** are `{"items": [...], "next_cursor": "…" | null}`, like the check history.
+  - **An incident** is `{"id", "started_at", "resolved_at", "error_kind", "status_code", "resolution"}`; `resolved_at` and `resolution` are `null` while it is open.
+  - **In the list across monitors,** each incident also carries `"monitor": {"id", "name"}`: a nested object reads better, and anything else about the monitor would go inside it, not next to the incident's own fields.
+  - **No derived fields** (`duration_seconds`, `state`): they follow from `started_at` and `resolved_at`. A field can be added later without breaking anyone; removing one breaks clients.
+- **`state` is a closed list:** `open` or `resolved` (requested by the project owner). Any other value is a 422 `validation_error`; without it, both.
 - **`limit`** 1–100, 50 by default, as for checks.
-- **Cursor:** opaque and strictly decoded, like the history's (ADR-050), with its own prefix. Its key is `(started_at, public_id)`, because two monitors can have incidents starting at the same microsecond. A forged cursor is a 422 `invalid_cursor` that does not echo it.
+- **Cursor:** opaque and strictly decoded, like the history's (ADR-050): `base64url` of `i1:<started_at in µs>:<incident id>`, one format for both lists.
+  - **The incident's id breaks ties:** two monitors can have incidents starting at the same microsecond. It is already public in the items, so the cursor reveals nothing new.
+  - **Its own prefix:** a check-history cursor is refused here, and an incident cursor there.
+  - A forged cursor is a 422 `invalid_cursor` that does not echo it, and the monitor always comes from the URL, never from the cursor.
 - **The internal ids** (`id` of the incident and of the monitor) are never exposed.
 
 **Rejected.** **Only the per-monitor route:** knowing "what is down right now" would mean asking every monitor.
 
-**Weak point.** Two more routes to keep stable.
+**Weak point.**
+- Two more routes to keep stable.
+- The incident cursor is longer than the history's (about 72 characters).
 
 **Reversibility.** Hard: routes and response shapes are a public contract.
 

@@ -1,12 +1,20 @@
 """Incidents and the alerts written with them (ADR-061 to ADR-063)."""
 
+from collections.abc import Sequence
 from datetime import datetime, timedelta
+from uuid import UUID
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import Row, Select, delete, func, select, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from pulseops.db.models import Incident, Notification
+from pulseops.db.models import Incident, Monitor, Notification
 from pulseops.incidents import OpenIncident
+
+# The API's `state` filter, from a closed list (never user-built SQL).
+STATES = {
+    "open": Incident.resolved_at.is_(None),
+    "resolved": Incident.resolved_at.is_not(None),
+}
 
 # First key of the two-key advisory lock taken per monitor. Any other advisory
 # lock in PulseOps must use a different first key, so they never collide.
@@ -37,6 +45,45 @@ async def latest_incident(session: AsyncSession, monitor_id: int) -> Incident | 
         .limit(1)
     )
     return await session.scalar(query)
+
+
+async def get_open_incident(session: AsyncSession, monitor_id: int) -> Incident | None:
+    """At most one, by construction (ix_incidents_monitor_id_open)."""
+    query = select(Incident).where(
+        Incident.monitor_id == monitor_id, Incident.resolved_at.is_(None)
+    )
+    return await session.scalar(query)
+
+
+def incidents_statement(
+    *,
+    limit: int,
+    monitor_id: int | None = None,
+    state: str | None = None,
+    before: tuple[datetime, UUID] | None = None,
+) -> Select:
+    """Newest first, strictly after `before` in that order (keyset pagination).
+
+    Ordered by (started_at, public_id): two monitors can have incidents that
+    start at the same microsecond, and the public id breaks the tie.
+    """
+    query = select(Incident, Monitor.public_id, Monitor.name).join(
+        Monitor, Incident.monitor_id == Monitor.id
+    )
+    if monitor_id is not None:
+        query = query.where(Incident.monitor_id == monitor_id)
+    if state is not None:
+        query = query.where(STATES[state])
+    if before is not None:
+        query = query.where(tuple_(Incident.started_at, Incident.public_id) < before)
+    return query.order_by(Incident.started_at.desc(), Incident.public_id.desc()).limit(
+        limit
+    )
+
+
+async def list_incidents(session: AsyncSession, **filters) -> Sequence[Row]:
+    """Rows of (incident, monitor's public id, monitor's name)."""
+    return (await session.execute(incidents_statement(**filters))).all()
 
 
 async def open_incident(
