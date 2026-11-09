@@ -5,6 +5,7 @@ from pathlib import Path
 
 import httpx2
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from pulseops.config import ApiSettings, Settings
@@ -136,6 +137,25 @@ def test_api_settings_never_carry_the_broker_password():
     # The API does not use the queue; only BrokerSettings (worker) has it.
     assert "broker_url" not in Settings.model_fields
     assert "broker_url" not in ApiSettings.model_fields
+
+
+def test_only_the_worker_gets_the_bot_token():
+    # ADR-066: the API never sees the token, in its settings or its container.
+    assert "telegram_bot_token" not in Settings.model_fields
+    assert "telegram_bot_token" not in ApiSettings.model_fields
+    services = yaml.safe_load(Path("docker-compose.yml").read_text())["services"]
+    for name, service in services.items():
+        telegram = {k for k in service.get("environment", {}) if "TELEGRAM" in k}
+        expected = (
+            {"TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"} if name == "worker" else set()
+        )
+        assert telegram == expected, name
+    # Optional, unlike the passwords: empty means alerts off (never ${VAR:?}).
+    worker = services["worker"]["environment"]
+    assert worker["TELEGRAM_BOT_TOKEN"] == "${TELEGRAM_BOT_TOKEN:-}"
+    example = Path(".env.example").read_text()
+    assert "\nTELEGRAM_BOT_TOKEN=\n" in example
+    assert "\nTELEGRAM_CHAT_ID=\n" in example
 
 
 async def test_docs_can_be_disabled(api_key):

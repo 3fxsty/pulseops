@@ -444,6 +444,9 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - **Las 24 h de reintentos se cuentan desde el primer intento, no desde que se creó el aviso:** si no, un DOWN que esperó a un worker parado tendría un solo intento si Telegram fallaba justo entonces. Hizo falta la columna `first_attempt_at`, añadida en la propia `0004`, que aún no había salido de la rama (la BD de desarrollo se rehízo con `downgrade 0003` + `upgrade`; tenía 0 incidentes y 0 avisos).
   - **Conectar a un puerto local cerrado no siempre se rechaza al momento:** en la máquina de desarrollo, asyncpg se quedó colgado 60 s (su timeout de conexión) contra `127.0.0.1:1`. Es justo el caso que cubre el plazo de 3 s de `/health/scheduler`.
   - **`/health` se mueve a `api/health.py`,** junto a `/health/scheduler`, sin cambiar su comportamiento.
+  - **El smoke test pasa de 29/29 en 6,5 s a 37/37 en unos 35 s:** el incidente necesita 2 checks fallidos con 30 s de intervalo. Su monitor se crea al principio para que el resto de la prueba corra mientras tanto.
+  - **El smoke test no puede ver el reparto de avisos:** borra sus monitores (y en cascada sus avisos) antes del siguiente turno del cron. Comprobado aparte, de punta a punta: con las alertas apagadas, el aviso pasa a `skipped`.
+  - **PyYAML** llega con `uvicorn[standard]` (dependencia de producción); un test lo usa para leer `docker-compose.yml` y comprobar que la API nunca recibe el token.
   - **El cron de reparto solo registra el *tipo* de un error inesperado,** no su mensaje: un fallo del canal podría citar la URL de la Bot API, que lleva el token.
 - **Antes:** MVP completo con la release v0.1.0 (2026-10-28) y el repo **público**. Fase 6 cerrada (PR #7 y PR #11). Después vinieron el repaso de seguridad (PR #12), las dependencias de Dependabot (PR #13 y #14) y la documentación de ArdiQ 1.2.1 (PR #15).
 - **Hecho en Fase 6:**
@@ -587,5 +590,5 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   5. ✅ `pulseops/alerts/` (`Notifier`, `TelegramNotifier`, mensaje, comando de prueba) y `AlertSettings`.
   6. ✅ Cron `deliver_notifications` (`pulseops/delivery.py`), carril `alerts`, solo reintentos temporales y retención de los incidentes de 1 año.
   7. ✅ API de incidentes (`api/incidents.py`, cursor `i1`), `open_incident` en `/stats` y `/health/scheduler` (`api/health.py`, con `Cache-Control: no-store`).
-  8. Compose, `.env.example`, README, smoke test y `docs/evidence.md`.
+  8. ✅ Compose (Telegram solo para el worker, opcional), `.env.example` (vacías = apagadas), README (sección "Incidents and alerts", rutas, diagrama), smoke test (37 casos) y verificaciones en `docs/evidence.md`. **Al cerrar la fase:** fila de la Fase 7 y desglose de tests en `docs/evidence.md`.
   9. Prueba manual de Toni con un bot real; antes, explicarle paso a paso cómo crear el bot con BotFather y sacar el `chat_id`.
