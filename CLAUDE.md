@@ -444,6 +444,7 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   - **Las 24 h de reintentos se cuentan desde el primer intento, no desde que se creó el aviso:** si no, un DOWN que esperó a un worker parado tendría un solo intento si Telegram fallaba justo entonces. Hizo falta la columna `first_attempt_at`, añadida en la propia `0004`, que aún no había salido de la rama (la BD de desarrollo se rehízo con `downgrade 0003` + `upgrade`; tenía 0 incidentes y 0 avisos).
   - **Conectar a un puerto local cerrado no siempre se rechaza al momento:** en la máquina de desarrollo, asyncpg se quedó colgado 60 s (su timeout de conexión) contra `127.0.0.1:1`. Es justo el caso que cubre el plazo de 3 s de `/health/scheduler`.
   - **`/health` se mueve a `api/health.py`,** junto a `/health/scheduler`, sin cambiar su comportamiento.
+  - **example.com vuelve a responder desde la red de desarrollo** (2026-11-09): 200 en ~70 ms con el comprobador y con `curl`. No se sabe por qué fallaba antes ni qué ha cambiado (ver "Cambios descubiertos en Fase 3 y 4").
   - **El smoke test pasa de 29/29 en 6,5 s a 37/37 en unos 35 s:** el incidente necesita 2 checks fallidos con 30 s de intervalo. Su monitor se crea al principio para que el resto de la prueba corra mientras tanto.
   - **El smoke test no puede ver el reparto de avisos:** borra sus monitores (y en cascada sus avisos) antes del siguiente turno del cron. Comprobado aparte, de punta a punta: con las alertas apagadas, el aviso pasa a `skipped`.
   - **PyYAML** llega con `uvicorn[standard]` (dependencia de producción); un test lo usa para leer `docker-compose.yml` y comprobar que la API nunca recibe el token.
@@ -591,4 +592,14 @@ GitHub Actions (Ruff + tests con PostgreSQL y Valkey como servicios + `alembic c
   6. ✅ Cron `deliver_notifications` (`pulseops/delivery.py`), carril `alerts`, solo reintentos temporales y retención de los incidentes de 1 año.
   7. ✅ API de incidentes (`api/incidents.py`, cursor `i1`), `open_incident` en `/stats` y `/health/scheduler` (`api/health.py`, con `Cache-Control: no-store`).
   8. ✅ Compose (Telegram solo para el worker, opcional), `.env.example` (vacías = apagadas), README (sección "Incidents and alerts", rutas, diagrama), smoke test (37 casos) y verificaciones en `docs/evidence.md`. **Al cerrar la fase:** fila de la Fase 7 y desglose de tests en `docs/evidence.md`.
-  9. Prueba manual de Toni con un bot real; antes, explicarle paso a paso cómo crear el bot con BotFather y sacar el `chat_id`.
+  9. ✅ **Prueba manual de Toni con un bot real** (2026-11-09):
+     - ✅ Toni creó el bot con BotFather, sacó el `chat_id` con `getUpdates` y los puso en su `.env` (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`); el worker arrancó con alertas activas.
+     - ✅ `docker compose exec worker python -m pulseops.alerts test` → el mensaje llegó.
+     - ✅ DOWN y RECOVERED reales (22:23–22:26 UTC): monitor "Flaky test site" (30 s) contra el contenedor `pulseops-flaky` (`docker run -d --rm --name pulseops-flaky --network pulseops_default pulseops python -m http.server 8080`). Los dos avisos `sent` al primer intento, 9 s después del check que abrió o cerró el incidente. El fallo sale como `dns_error`, no `connection_error`: con `--rm`, el contenedor parado se borra y el DNS de Docker ya no conoce el nombre.
+     - ✅ `docker compose stop worker` → `/health/scheduler` 503 `stale` en menos de 60 s; al arrancarlo, 200 en 4 s (siempre con `no-store`).
+     - ✅ Logs de `worker`, `postgres`, `api` y `valkey`: 0 coincidencias del token, de la Bot API, de la URL de prueba y de las contraseñas (contado sin imprimirlos).
+     - ✅ Telegram 400 con el bot real (`docker compose exec -e TELEGRAM_CHAT_ID=1 worker python -m pulseops.alerts test`): mensaje claro y salida 1.
+     - ✅ Telegram 403 con el bot real (Toni lo bloqueó un momento): mensaje claro y salida 1.
+     - ✅ Recogida: el contenedor `pulseops-flaky` está borrado y `ALLOW_PRIVATE_TARGETS` ha vuelto a `false` (estuvo en `true` de 22:22 a 22:33 UTC). La API y el worker están recreados, y `http://postgres:5432/` vuelve a dar 422. El monitor "Flaky test site" se pausó para que Toni viera su incidente en la API y después se borró, y su incidente y sus avisos se fueron con él por la cascada.
+     - ✅ Toni confirmó que los dos mensajes llegaron con el nombre, el id, `dns_error`, el inicio y la duración en UTC, y **sin la URL**. El bot vuelve a estar desbloqueado.
+     - Después: cerrar la fase (fila de la Fase 7 y desglose de tests en `docs/evidence.md`, "Estado actual" completo, PR hacia `main`).
