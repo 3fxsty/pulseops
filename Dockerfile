@@ -6,7 +6,7 @@ FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b98
 
 # The base image ships ca-certificates, which httpx2 needs: it verifies TLS
 # against the OS trust store (via truststore). Keep them if the base changes.
-FROM python:3.13.18-slim@sha256:76baad6037690d6e8c4397fbcaef17bca6f19eecef822b708fe8fa3417d30bb5
+FROM python:3.13.18-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
 COPY --from=uv /uv /uvx /bin/
 
